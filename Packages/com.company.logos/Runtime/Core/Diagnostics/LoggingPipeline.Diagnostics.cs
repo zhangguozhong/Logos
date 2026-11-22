@@ -43,6 +43,7 @@ namespace Logos
                     return false;
                 UpdateDiagnosticControl(false, false, null, request);
             }
+            incidentInfo?.Reset(ReadControlState());
             NotifyControl();
             return true;
         }

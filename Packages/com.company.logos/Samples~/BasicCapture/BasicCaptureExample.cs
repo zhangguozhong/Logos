@@ -36,8 +36,6 @@ namespace Logos.Samples.BasicCapture
             UnityLogger.Warn("Sample warning", "sample.warn");
             UnityLogger.Error("Sample error", "sample.error");
             UnityLogger.Fatal("Sample fatal", "sample.fatal");
-            // 实际 Unity 自动回调：Log 映射为 Info，来源为 Unity。只触发一次，不运行压力循环。
-            UnityEngine.Debug.Log("BasicCapture automatic Unity log");
         }
 
         // 登录流程开始时保存身份版本，业务确认登录后才发布；登出时传 null。

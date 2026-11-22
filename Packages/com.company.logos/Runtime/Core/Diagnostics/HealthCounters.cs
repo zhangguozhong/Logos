@@ -45,6 +45,12 @@ namespace Logos
     internal sealed class HealthSnapshot
     {
         private readonly long[] values;
+#if LOGOS_WORKER_BENCHMARK
+        internal long WorkerIdleWaits, WorkerSignaledWaits, WorkerEmptyWakes, RunTailWakeSets;
+        internal long LiveSummaryScans, StopSummaryScans, LiveSummaryAttempts, StopSummaryAttempts;
+        internal long LiveSummaryScanTicks, StopSummaryScanTicks;
+#endif
+        internal long IncidentInfoAttempts, IncidentInfoTransferred, IncidentInfoMissed;
         internal long CoalescedUnityInfo, RecoveredUnityInfoObservations, UnityRepeatSummaryAttempts;
         public long ProducerWakeSets
         {

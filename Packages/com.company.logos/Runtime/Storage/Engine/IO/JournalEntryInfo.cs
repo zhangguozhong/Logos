@@ -12,8 +12,13 @@ namespace Logos.Storage
             get;
         }
 
-        public JournalEntryInfo(long length, bool regular)
+        internal bool IsPlainDirectory { get; }
+
+        public JournalEntryInfo(long length, bool regular) : this(length, regular, false) { }
+
+        internal JournalEntryInfo(long length, bool regular, bool plainDirectory)
         {
+            IsPlainDirectory = plainDirectory;
             Length = length;
             IsRegularFile = regular;
         }

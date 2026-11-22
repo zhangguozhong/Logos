@@ -405,6 +405,28 @@ namespace Logos.Storage
                 string name = Path.GetFileName(path);
                 if (name == ".owner.lock" || name == ".journal-state")
                     continue;
+                if (name == DirectoryQuota.UploadDirectoryName)
+                {
+                    if (!UploadWorkspace.IsSupported)
+                        throw new JournalBlockedException(JournalBlockReason.UnknownFile);
+                    bool emptied = false;
+                    try
+                    {
+                        emptied = CleanUploadPage(true);
+                    }
+                    finally
+                    {
+                        // 枚举器已越过目录。失败或仍有下一页时，重试必须重新遇到它。
+                        if (!emptied)
+                        {
+                            Clear.UnknownEntries.Dispose();
+                            Clear.UnknownEntries = null;
+                        }
+                    }
+                    if (!emptied)
+                        return;
+                    continue;
+                }
                 var info = files.GetEntryInfo(path);
                 if (!info.IsRegularFile)
                     throw new JournalBlockedException(JournalBlockReason.UnknownFile);

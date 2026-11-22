@@ -30,3 +30,15 @@ bool installed = LogosSdk.TryInitialize(loggingSettings, storageSettings, storag
 `IUploadService.TryStart` 应快速返回，交给 SDK 管理重试。返回的操作借用只读 `UploadBody`，直至 `TryClose` 返回真。接收端达到约定的持久化条件后再返回成功；回执必须匹配批次标识、SHA-256 和接收长度。
 
 `RequestCancel` 应立即返回。上传仍在进行或未真正关闭时，保留服务和会话并继续轮询。服务由调用方释放；请在主线程逐帧调用 `LogosSdk.TryStopForUnload`，返回真后再销毁宿主资源。[停止与卸载](Lifecycle.md) · [上传示例](../Samples~/InjectedUpload/README.md) · [HTTP 接入](Http-README.md)
+
+## 对接只接收文件路径的上传服务
+
+初始化时将 `new FileUploadAdapter(businessUploader)` 赋给同一个 `LogosUploadOptions.Service`。业务上传器实现 `IFileUploader`，其 `DestinationId` 应与配置一致。需要复用同一会话时保留该适配器实例。
+
+文件工作区在 POSIX 平台仅支持 x64 和 arm64 进程，沿用本地日志默认目录租约对 64 位 POSIX 的要求。32 位 Android 进程会在创建暂存目录或文件前拒绝文件导出。若使用其他目录租约打开已有暂存目录，且当前平台无法确认该目录的占用，SDK 保留残留文件，暂停新增落盘，并在 `DirectoryUsage.IsUploadFileUsageKnown` 返回 `false`。
+
+`TryStart` 接收本批次已授权、校验完成的临时文件路径，须立即返回单次操作句柄。业务决定协议和鉴权方式，按只读方式打开路径；用服务端实际返回的批次 ID、正文 SHA-256 和接收长度构造回执。接收端须按批次幂等保存。限流、临时失败和取消分别通过原有操作接口报告，Logos 负责退避和重新授权检查。业务关闭底层自动重传；只有读文件、网络传输及相关回调均已释放该路径时，才能报告实际关闭。Logos 随后删除文件。跨进程离线排队的上传接口不能保证这一生命周期。
+
+撤权和交付路径有明确的先后顺序。撤权成功返回后，旧授权尚未交付的路径不会再传给业务。若 `TryStart` 已进入，业务会收到取消请求；在操作确认实际关闭之前，文件仍由该操作借用。`TryStart` 只安排一次异步发送并立即返回，禁止同步等待 Unity 主线程、网络响应或文件读取。否则同时发生的撤权或停止可能被业务回调阻塞。
+
+异常退出后，无论下次注入正文服务还是文件适配器，Logos 都会在取得日志目录所有权后清理已有工作区，无需用户重新授权。磁盘额度按剩余文件计费。工作区内的未知文件会保留，并阻止新的文件导出；同目录下可确认归属的普通暂存文件仍会清理。业务应将自己的文件放在独立目录。

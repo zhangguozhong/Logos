@@ -59,6 +59,7 @@ namespace Logos.Storage
             Volatile.Write(ref clearOwned, 1);
             auxiliaryBarrier?.CloseTargets(scope);
             PublishGate();
+            if (scope.Contains(activeDay)) incidentInfoObserver?.InvalidateIncidentQuota();
         }
         public bool ClearOwnedMemory(long cleanupGeneration)
         {

@@ -33,9 +33,11 @@ namespace Logos.Storage
         public JournalEntryInfo GetEntryInfo(string path)
         {
             var info = new FileInfo(path);
+            var attributes = info.Attributes;
             bool regular =
-                (info.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0;
-            return new JournalEntryInfo(regular ? info.Length : 0, regular);
+                (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == 0;
+            return new JournalEntryInfo(regular ? info.Length : 0, regular,
+                (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) == FileAttributes.Directory);
         }
 
         public void DeleteFile(string path)

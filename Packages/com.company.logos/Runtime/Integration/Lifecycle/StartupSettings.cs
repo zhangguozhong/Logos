@@ -20,7 +20,13 @@ namespace Logos
             if (a.Version != b.Version || a.Enabled != b.Enabled || a.AggregationEnabled != b.AggregationEnabled ||
                 a.IncidentEnabled != b.IncidentEnabled || a.BudgetEnabled != b.BudgetEnabled)
                 return false;
-            if (initial.NormalQueueCount != requested.NormalQueueCount || initial.ErrorQueueCount != requested.ErrorQueueCount
+#if UNITY_EDITOR
+            if (initial.LegacyRunWorkerForBenchmark != requested.LegacyRunWorkerForBenchmark ||
+                initial.LegacyRepeatSummaryForBenchmark != requested.LegacyRepeatSummaryForBenchmark)
+                return false;
+#endif
+            if (initial.IncidentInfoContext != requested.IncidentInfoContext || initial.ConsecutiveUnityInfo != requested.ConsecutiveUnityInfo
+                || initial.NormalQueueCount != requested.NormalQueueCount || initial.ErrorQueueCount != requested.ErrorQueueCount
                 || initial.NormalQueueBytes != requested.NormalQueueBytes || initial.ErrorQueueBytes != requested.ErrorQueueBytes
                 || initial.MaxMessageChars != requested.MaxMessageChars || initial.MaxStackChars != requested.MaxStackChars
                 || initial.BatchCount != requested.BatchCount || initial.BatchBytes != requested.BatchBytes

@@ -39,6 +39,8 @@ namespace Logos.Transport
             this.policy = policy ?? throw new ArgumentNullException(nameof(policy));
             this.installation = TransferValidation.Id(installation, nameof(installation));
             this.destination = TransferValidation.Id(destination, nameof(destination));
+            if (service is FileUploadAdapter)
+                fileSpool = new FileUploadSpool(journal);
             access.SetCoordinatorGate(false, 0);
         }
         private void CheckOwner()
@@ -121,7 +123,7 @@ namespace Logos.Transport
             admittedRevision[free] = current.Revision;
             return TransferAdmission.Accepted;
         }
-        internal void Step(JournalStepContext context, long now)
+        internal void Step(JournalStepContext context, long now, IMonotonicClock liveClock = null)
         {
             CheckOwner();
             if (disposed || context.ShouldYield || context.StopRequested)
@@ -134,9 +136,14 @@ namespace Logos.Transport
             }
             if (permit != null)
             {
-                DriveOperation(now);
+                DriveOperation(now, context, liveClock);
                 return;
             }
+            // 正文模式只在已有工作区时清理上次会话遗留的文件。使用首次清点结果，避免额外探测磁盘。
+            if (fileSpool == null && journal.Status == JournalStatus.Ready && journal.HasUploadWorkspace)
+                fileSpool = new FileUploadSpool(journal);
+            if (fileSpool != null)
+                MaintainFileSpool(now);
             if ((stopping || clearing || exporterClosePending) && exporter != null)
             {
                 CloseExporter();
@@ -299,6 +306,11 @@ namespace Logos.Transport
                 }
             if (DriveAutomatic(now, utc, ctx))
                 return;
+            if (!settling && FileSpoolUnavailable)
+            {
+                reason = fileRecoveryFailed ? "FileCleanupBlocked" : "FileRecoveryPending";
+                return;
+            }
             DriveExecution(context, now, utc, ctx);
         }
         private TaskSlot[] Rows() => new[] { store.Durable.Slot(0), store.Durable.Slot(1), store.Durable.Slot(2), store.Durable.Slot(3) };

@@ -212,7 +212,7 @@ namespace Logos
                 ByteCapacity = bytes;
             }
         }
-        public BoundedLogQueue(LoggingOptions options, long generation = 1)
+        public BoundedLogQueue(LoggingOptions options, long generation = 1, bool reserveIncident = true)
         {
             if (options == null)
                 throw new ArgumentNullException(nameof(options));
@@ -225,12 +225,14 @@ namespace Logos
             stackLimit = frozen.MaxStackChars;
             batchCount = frozen.BatchCount;
             batchBytes = frozen.BatchBytes;
-            slots = new Slot[frozen.NormalQueueCount + frozen.ErrorQueueCount];
-            partitions = new[] { new Partition(0, frozen.NormalQueueBytes), new Partition(frozen.NormalQueueCount, frozen.ErrorQueueBytes) };
+            int normalSlots = frozen.NormalQueueCount - (reserveIncident && frozen.EffectiveIncidentInfoContext ? LoggingOptions.IncidentReservedSlots : 0);
+            int normalBytes = frozen.NormalQueueBytes - (reserveIncident && frozen.EffectiveIncidentInfoContext ? LoggingOptions.IncidentReservedBytes : 0);
+            slots = new Slot[normalSlots + frozen.ErrorQueueCount];
+            partitions = new[] { new Partition(0, normalBytes), new Partition(normalSlots, frozen.ErrorQueueBytes) };
             for (int i = 0; i < slots.Length; i++)
             {
-                int partition = i < frozen.NormalQueueCount ? 0 : 1;
-                int end = partition == 0 ? frozen.NormalQueueCount : slots.Length;
+                int partition = i < normalSlots ? 0 : 1;
+                int end = partition == 0 ? normalSlots : slots.Length;
                 slots[i].Partition = partition;
                 slots[i].Next = i + 1 < end ? i + 1 : -1;
             }

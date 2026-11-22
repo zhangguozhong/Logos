@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 
 namespace Logos.Storage
 {
@@ -25,6 +26,39 @@ namespace Logos.Storage
         private readonly IJournalFileSystem files;
         private readonly string directory;
         private IEnumerator<string> entries;
+        internal bool HasUploadWorkspace { get; private set; }
+        internal const string UploadDirectoryName = ".upload-spool";
+        private IEnumerator<long> uploadEntries;
+        private readonly Func<IDirectoryLease> uploadOwner;
+        private long scannedUploadBytes;
+        // 首次恢复前使用清点值，此后由唯一文件导出器维护，包含预留和删除失败的占用。
+        private long managedUploadBytes = -1;
+        private long fileBytes;
+        internal long UploadBytes
+        {
+            get
+            {
+                long managed = Interlocked.Read(ref managedUploadBytes);
+                return managed < 0 ? scannedUploadBytes : managed;
+            }
+        }
+        internal void SetUploadCharge(long bytes) => Interlocked.Exchange(ref managedUploadBytes, bytes);
+        internal void ClearUploadCharge()
+        {
+            SetUploadCharge(0);
+            UploadUsageUnknown = false;
+        }
+
+        internal bool TryReserveUpload(int bytes, FrozenStorageOptions limits)
+        {
+            if (bytes <= 0 || !IsReady || unsafeEntry || UploadUsageUnknown || Interlocked.Read(ref managedUploadBytes) != 0
+                || !Fits(ActualBytes, bytes, limits.MaxDirectoryBytes)
+                || !Fits(NormalBytes, UnknownBytes, limits.DirectoryNormalBytes)
+                || !Fits(NormalBytes + UnknownBytes, bytes, limits.DirectoryNormalBytes))
+                return false;
+            return Interlocked.CompareExchange(ref managedUploadBytes, bytes, 0) == 0;
+        }
+        internal volatile bool UploadUsageUnknown;
         private bool unsafeEntry;
         private long nextScanAttemptTimestamp;
         public bool IsReady
@@ -39,11 +73,7 @@ namespace Logos.Storage
             get;
             private set;
         }
-        public long ActualBytes
-        {
-            get;
-            private set;
-        }
+        public long ActualBytes => checked(fileBytes + UploadBytes);
         public long MetadataBytes
         {
             get;
@@ -66,19 +96,27 @@ namespace Logos.Storage
         }
 
         public DirectoryQuota(IJournalFileSystem files, string directory)
+            : this(files, directory, null) { }
+
+        internal DirectoryQuota(IJournalFileSystem files, string directory, Func<IDirectoryLease> uploadOwner)
         {
+            this.uploadOwner = uploadOwner;
             this.files = files ?? throw new ArgumentNullException(nameof(files));
             this.directory = directory ?? throw new ArgumentNullException(nameof(directory));
         }
 
         public void RestartScan()
         {
+            uploadEntries?.Dispose();
+            uploadEntries = null;
             entries?.Dispose();
             entries = null;
             IsReady = false;
             nextScanAttemptTimestamp = 0;
-            unsafeEntry = false;
-            ActualBytes = MetadataBytes = NormalBytes = ErrorBytes = UnknownBytes = 0;
+            unsafeEntry = HasUploadWorkspace = false;
+            if (Interlocked.Read(ref managedUploadBytes) < 0)
+                UploadUsageUnknown = false;
+            scannedUploadBytes = fileBytes = MetadataBytes = NormalBytes = ErrorBytes = UnknownBytes = 0;
             for (int i = 0; i < days.Length; i++)
                 days[i].Physical = 0;
         }
@@ -111,6 +149,30 @@ namespace Logos.Storage
                 entries = files.EnumerateEntries(directory).GetEnumerator();
             while (LastStepEntries < 8 && !context.ShouldYield)
             {
+                if (uploadEntries != null)
+                {
+                    try
+                    {
+                        if (Interlocked.Read(ref managedUploadBytes) < 0 && uploadEntries.MoveNext())
+                        {
+                            LastStepEntries++;
+                            if (uploadEntries.Current < 0)
+                                UploadUsageUnknown = true;
+                            else
+                                scannedUploadBytes = checked(scannedUploadBytes + uploadEntries.Current);
+                            continue;
+                        }
+                    }
+                    catch (Exception ex) when (ex is NotSupportedException || ex is DllNotFoundException || ex is EntryPointNotFoundException)
+                    {
+                        // 平台缺少原生能力：已有文件保留，无法证明总量安全时关闭磁盘准入。
+                        unsafeEntry = UploadUsageUnknown = true;
+                    }
+                    uploadEntries.Dispose();
+                    uploadEntries = null;
+                    continue;
+                }
+
                 if (!entries.MoveNext())
                 {
                     entries.Dispose();
@@ -122,6 +184,20 @@ namespace Logos.Storage
                 LastStepEntries++;
                 string path = entries.Current;
                 var info = files.GetEntryInfo(path);
+                string name = Path.GetFileName(path);
+                if (name == UploadDirectoryName && !info.IsRegularFile)
+                {
+                    HasUploadWorkspace = info.IsPlainDirectory;
+                    // 暂存目录只含一层文件。重解析点与符号链接均不可进入。
+                    if (info.IsPlainDirectory && Interlocked.Read(ref managedUploadBytes) < 0)
+                    {
+                        if (uploadOwner == null || !UploadWorkspace.IsSupported)
+                            unsafeEntry = UploadUsageUnknown = true;
+                        else
+                            uploadEntries = UploadWorkspace.Inventory(uploadOwner()).GetEnumerator();
+                    }
+                    continue;
+                }
                 if (!info.IsRegularFile)
                 {
                     unsafeEntry = true;
@@ -129,8 +205,7 @@ namespace Logos.Storage
                 }
 
                 long length = info.Length;
-                ActualBytes = checked(ActualBytes + length);
-                string name = Path.GetFileName(path);
+                fileBytes = checked(fileBytes + length);
                 if (name == ".journal-state" || name == ".owner.lock")
                 {
                     MetadataBytes = checked(MetadataBytes + length);
@@ -196,7 +271,7 @@ namespace Logos.Storage
             if (IsReady)
             {
                 AddClassified(days[slot], -1);
-                ActualBytes = checked(ActualBytes - old.Physical + physical);
+                fileBytes = checked(fileBytes - old.Physical + physical);
             }
 
             days[slot].Physical = physical;
@@ -206,7 +281,7 @@ namespace Logos.Storage
 
         internal void ObserveUnknownDeleted(long bytes)
         {
-            ActualBytes -= bytes;
+            fileBytes -= bytes;
             UnknownBytes -= bytes;
         }
 
@@ -225,6 +300,7 @@ namespace Logos.Storage
             if (
                 !IsReady
                 || unsafeEntry
+                || UploadUsageUnknown
                 || MetadataBytes > StorageOptions.MetadataBudgetBytes
                 || r.WireBytes < 0
             )
@@ -235,7 +311,8 @@ namespace Logos.Storage
             // 未知字节可能属于任一分区，检查类别额度时必须保守计入；检查目录总量时只计一次实际占用。
             return Fits(ActualBytes, r.HeaderBytes + (long)r.WireBytes, o.MaxDirectoryBytes)
                 && Fits(NormalBytes, UnknownBytes, o.DirectoryNormalBytes)
-                && Fits(NormalBytes + UnknownBytes, ordinary, o.DirectoryNormalBytes)
+                && (ordinary == 0 || (Fits(NormalBytes + UnknownBytes, UploadBytes, o.DirectoryNormalBytes)
+                    && Fits(NormalBytes + UnknownBytes + UploadBytes, ordinary, o.DirectoryNormalBytes)))
                 && Fits(ErrorBytes, UnknownBytes, o.DirectoryErrorBytes)
                 && Fits(ErrorBytes + UnknownBytes, error, o.DirectoryErrorBytes);
         }
@@ -245,6 +322,8 @@ namespace Logos.Storage
 
         public void Dispose()
         {
+            uploadEntries?.Dispose();
+            uploadEntries = null;
             entries?.Dispose();
             entries = null;
         }

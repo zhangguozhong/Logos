@@ -68,6 +68,11 @@ namespace Logos
         {
             get;
         }
+        // 写入由流水线既有生命周期门串行化，worker 按所读控制代际独立查看进度。
+        private long incidentObservation;
+        internal long NextIncidentObservation() => Interlocked.Increment(ref incidentObservation);
+        internal long LatestIncidentObservation => Interlocked.Read(ref incidentObservation);
+
         internal DiagnosticControlState(long generation, long policyRevision, long contextRevision, LogContext context, long requestRevision, TemporaryDiagnosticRequest request, bool enabled, bool budgetEnabled)
         {
             PipelineGeneration = generation;

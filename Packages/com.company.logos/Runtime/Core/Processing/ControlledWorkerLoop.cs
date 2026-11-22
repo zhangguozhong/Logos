@@ -84,6 +84,7 @@ namespace Logos
                     bool finish = stop.Requested && DrainRepeatTail == null;
                     if (startup || (finish && !stoppingStep) || (now >= nextControlAttempt && (finish || now >= workerControl.NextWakeTicks)))
                     {
+                        MarkWorkerActivity();
                         var phase = startup ? WorkerControlPhase.Startup : finish ? WorkerControlPhase.Stopping : queue.IsDayTransition ? WorkerControlPhase.DayTransition : WorkerControlPhase.Running;
                         var step = StepControl(phase);
                         if (phase == WorkerControlPhase.Stopping)
@@ -103,6 +104,7 @@ namespace Logos
                     bool attempted = buffered != null ? TransferOne(out contention) : ProcessControlledSynchronous(out contention);
                     if (attempted)
                     {
+                        MarkWorkerActivity();
                         // 新取得的存储所有权会使先前“排空完成”的观察失效。
                         if (stop.Requested)
                             drainComplete = false;
@@ -128,6 +130,8 @@ namespace Logos
                 queue.Close();
                 reason = WorkerFinalizationReason.ProcessorFault;
             }
+            // 故障退出也作废未交付的原文，不能依赖宿主之后一定会调用 Stop/Dispose。
+            IncidentWindow?.Reset(null);
             // 到达最终清理阶段前同步调用已返回。不在主线程释放资源。
             if (hasPin)
                 ResolveCurrentPin(true, AdmissionReason.Faulted);
@@ -220,6 +224,33 @@ namespace Logos
                 windowSpent = options.WorkerWindowBudgetTicks;
             return true;
         }
+        // 固定 worker 同步移交，沿用正常存储脱敏和配额。原始前缀不会进入普通队列等待后续消费。
+        internal bool CanTransferIncidentNow => !stop.Requested && !incidentTransferContext.DeadlineReached
+            && (buffered.ReadyClassMask & LogClassMask.Normal) != 0;
+        internal BatchTransferResult TransferIncidentRecord(LogRecord record)
+        {
+            var context = incidentTransferContext;
+            if (stop.Requested || context.IsCancellationRequested) return new BatchTransferResult(0, true, AdmissionReason.Stopping);
+            if (context.DeadlineReached) return new BatchTransferResult(0, pauseReason: TransferPauseReason.Budget);
+            if ((buffered.ReadyClassMask & LogClassMask.Normal) == 0)
+                return new BatchTransferResult(0, pauseReason: TransferPauseReason.Backpressure);
+            if (context.DeadlineReached) return new BatchTransferResult(0, pauseReason: TransferPauseReason.Budget);
+            batch[0] = record;
+            try
+            {
+                var result = buffered.TransferBatch(new LogBatchView(batch, 0, 1), context);
+                if (!ValidTransfer(result, context))
+                    throw new InvalidOperationException("Invalid incident transfer result.");
+                if (result.TransferredPrefix == 1)
+                {
+                    Interlocked.Increment(ref storageByLevel[(int)LogLevel.Info]);
+                    Interlocked.Increment(ref storageInFlight);
+                }
+                return result;
+            }
+            finally { batch[0] = null; }
+        }
+
         private bool TransferOne(out bool contention)
         {
             contention = false;
@@ -326,6 +357,7 @@ namespace Logos
                 return;
             while (buffered.TryPeekOutcome(out var outcome))
             {
+                MarkWorkerActivity();
                 if (outcome.Sequence == 0 || outcome.Sequence < lastOutcome || outcome.Sequence <= lastAcknowledged)
                     throw new InvalidOperationException("Nonmonotonic outcome.");
                 // 结果记账和后端确认分开。若 Ack 失败后再次窥见同一序号，只补确认，不能再次扣减在途数或累加已提交数。
@@ -363,7 +395,7 @@ namespace Logos
                 next = Math.Min(stop.Deadline, Math.Min(next, DrainRepeatTail == null ? nextControlAttempt : nextTerminalTail));
             int wait = next == long.MaxValue ? Timeout.Infinite : ToMilliseconds(Math.Max(0, next - now));
             InputProbeForTest?.Invoke(WorkerInputProbePhase.BeforeWait);
-            wake.WaitOne(IdentityWait(wait));
+            WaitForInput(IdentityWait(wait));
         }
     }
 }

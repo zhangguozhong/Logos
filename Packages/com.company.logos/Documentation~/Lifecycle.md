@@ -7,7 +7,7 @@
 | 调用位置 | 接口与约束 |
 |---|---|
 | Unity 主线程 | 读取配置资产，调用 `LogosSdk.TryInitialize`、`TryAttach`、身份与上下文更新、前后台通知，以及停止和轮询。原生宿主收到的通知应派发到 Unity 主线程。 |
-| 任意产生日志的线程 | 调用 `UnityLogger` 或 `LogosSession.TryLog`。Unity 自动采集使用源线程上已有的消息和堆栈；业务自行格式化消息仍有成本。 |
+| 任意产生日志的线程 | 调用 `UnityLogger` 或 `LogosSession.TryLog`。业务格式化消息和获取堆栈的成本由调用线程承担。 |
 | SDK 后台线程 | 自定义 `ILogBatchProcessor` 同步借用批次，仅在本次调用内访问记录，按确定完成的前缀返回。处理器应检查取消和截止时间，避免调用 Unity API 或使用 `Debug.Log` 记录自己的处理过程。 |
 
 ## 初始化与重复接入
@@ -20,7 +20,7 @@
 
 - **更新用户**。登录或切号请求发起时保存 `Generation` 和 `Context.IdentityContextVersion`。在主线程调用 `UpdateUser(generation, expectedIdentityVersion, diagnosticUserId, out identityVersion)`。使用后台映射的诊断标识，登出传 `null`。启动时身份为匿名，恢复登录态后再绑定。
 - **处理冲突**。`Updated` 或 `Unchanged` 表示该请求的身份已生效。`Conflict` 表示版本已变化，应丢弃迟到的请求；`StaleSession` 或 `Stopping` 时停止向旧会话提交。遇到 `WrongThread` 应回到主线程并重新核对原请求是否有效。
-- **跨切号异步操作**。订单等请求发起时可用 `CaptureContext()` 保存句柄，完成时用 `TryLog(handle, ...)` 记录结果。普通 `Debug.Log` 按打印时身份归属。切号不会改变已接收记录或已折叠重复项的归属。
+- **跨切号异步操作**。订单等请求发起时可用 `CaptureContext()` 保存句柄，完成时用 `TryLog(handle, ...)` 记录结果。未传句柄的业务日志按调用时的身份归属。切号后，已接收记录仍归原用户。
 - **页面与前后台**。`TryUpdateContext` 和 `TryLeaveVisit` 使用请求发起时保存的 `ContextRevision`。更新页面时保留当前身份版本。页面离开而 runtime 留驻时调用 `TryLeaveVisit`；前后台变化调用 `TryNotifyHostForeground(instanceId, generation, foreground)`。宿主通知优先，Unity pause 可作补充，失焦本身不表示进入后台。
 
 ## 安全停止

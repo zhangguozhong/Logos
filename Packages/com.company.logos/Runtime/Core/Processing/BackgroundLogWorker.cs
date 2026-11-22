@@ -168,10 +168,29 @@ namespace Logos
     // 一个所有者线程、一个有界批次；不预取，也不拥有或释放队列。
     internal sealed partial class BackgroundLogWorker : IDisposable
     {
+        internal bool IsWorkerThread => Thread.CurrentThread == thread;
         internal Func<bool> DrainRepeatTail;
         private const long TailRetryTicks = 10 * TimeSpan.TicksPerMillisecond;
         private long nextTerminalTail;
         internal Func<bool> DrainIdentityTails;
+        internal Func<bool> DrainRunTails;
+        internal IncidentInfoWindow IncidentWindow;
+        internal Action<long> DrainIncident;
+        private WorkerControlContext incidentTransferContext;
+        private long runTailDue = long.MaxValue;
+        internal void ScheduleRunTail(long now, bool fromWorker = false)
+        {
+            long due = AddSaturated(now, TimeSpan.TicksPerSecond);
+            if (Interlocked.CompareExchange(ref runTailDue, due, long.MaxValue) == long.MaxValue
+                && (!fromWorker || options.LegacyRunWorkerForBenchmark))
+            {
+                wake.Set();
+#if LOGOS_WORKER_BENCHMARK
+                Interlocked.Increment(ref runTailWakeSets);
+#endif
+            }
+        }
+
         private int identityTailsChanged;
         private bool holdNewNormalUntilRetry;
         private long retryIdentityTicks = long.MaxValue;
@@ -186,8 +205,10 @@ namespace Logos
 
         private int IdentityWait(int wait)
         {
-            if (retryIdentityTicks == long.MaxValue || stop.Requested) return wait;
-            int retry = ToMilliseconds(Math.Max(0, retryIdentityTicks - clock.TimestampTicks));
+            long due = DrainRunTails == null ? retryIdentityTicks : Math.Min(retryIdentityTicks, Interlocked.Read(ref runTailDue));
+            if (IncidentWindow != null) due = Math.Min(due, IncidentWindow.NextDueTicks);
+            if (due == long.MaxValue || stop.Requested) return wait;
+            int retry = ToMilliseconds(Math.Max(0, due - clock.TimestampTicks));
             return wait == Timeout.Infinite ? retry : Math.Min(wait, retry);
         }
 
@@ -198,9 +219,14 @@ namespace Logos
                 return false;
             long now = clock.TimestampTicks;
             if (now < nextTerminalTail) return false;
+            MarkWorkerActivity();
             if (DrainRepeatTail()) nextTerminalTail = AddSaturated(now, TailRetryTicks);
             else DrainRepeatTail = null;
             long spent = Math.Max(0, clock.TimestampTicks - now);
+#if LOGOS_WORKER_BENCHMARK
+            Interlocked.Increment(ref stopSummaryScans);
+            Interlocked.Add(ref stopSummaryScanTicks, spent);
+#endif
             batchSpent = AddSaturated(batchSpent, spent);
             windowSpent = AddSaturated(windowSpent, spent);
             return true;
@@ -223,6 +249,43 @@ namespace Logos
         private long faults, overruns, takeAttempts, budgetWaits;
         private int producerWakePending;
         private long producerWakeSets, controlWakeSets;
+#if LOGOS_WORKER_BENCHMARK
+        private long idleWaits, signaledWaits, emptyWakes, runTailWakeSets;
+        private long liveSummaryScans, stopSummaryScans, liveSummaryScanTicks, stopSummaryScanTicks;
+        private bool idleSignalWithoutWork;
+
+        internal void CopyBenchmarkCounters(HealthSnapshot result)
+        {
+            result.WorkerIdleWaits = Interlocked.Read(ref idleWaits);
+            result.WorkerSignaledWaits = Interlocked.Read(ref signaledWaits);
+            result.WorkerEmptyWakes = Interlocked.Read(ref emptyWakes);
+            result.RunTailWakeSets = Interlocked.Read(ref runTailWakeSets);
+            result.LiveSummaryScans = Interlocked.Read(ref liveSummaryScans);
+            result.StopSummaryScans = Interlocked.Read(ref stopSummaryScans);
+            result.LiveSummaryScanTicks = Interlocked.Read(ref liveSummaryScanTicks);
+            result.StopSummaryScanTicks = Interlocked.Read(ref stopSummaryScanTicks);
+        }
+#endif
+
+        [System.Diagnostics.Conditional("LOGOS_WORKER_BENCHMARK")]
+        private void MarkWorkerActivity()
+        {
+#if LOGOS_WORKER_BENCHMARK
+            idleSignalWithoutWork = false;
+#endif
+        }
+
+        private void WaitForInput(int milliseconds)
+        {
+#if LOGOS_WORKER_BENCHMARK
+            if (idleSignalWithoutWork) Interlocked.Increment(ref emptyWakes);
+            idleSignalWithoutWork = wake.WaitOne(milliseconds);
+            Interlocked.Increment(ref idleWaits);
+            if (idleSignalWithoutWork) Interlocked.Increment(ref signaledWaits);
+#else
+            wake.WaitOne(milliseconds);
+#endif
+        }
         // 仅供确定性竞态测试在空闲探测边界设置屏障；生产环境保持 null。
         internal Action<WorkerInputProbePhase> InputProbeForTest
         {
@@ -296,16 +359,53 @@ namespace Logos
             // 不在空探测之后清零，也不 Reset event；过期信号至多导致一次额外空探测。
             Interlocked.Exchange(ref producerWakePending, 0);
             InputProbeForTest?.Invoke(WorkerInputProbePhase.AfterReset);
+            if (IncidentWindow != null && !stop.Requested && IncidentWindow.NextDueTicks <= clock.TimestampTicks)
+            {
+                long begin = clock.TimestampTicks;
+                // 一轮至多移交一个前缀。扫描、文本复制与后端脱敏共用本轮起始截止时间。
+                incidentTransferContext = ControlContext(WorkerControlPhase.Running);
+                long allowance = incidentTransferContext.RemainingBudgetTicks;
+                try { DrainIncident(begin); }
+                finally
+                {
+                    incidentTransferContext = default;
+                    ChargeWork(begin, allowance);
+                }
+                if (batchSpent >= options.WorkerBudgetTicks || windowSpent >= options.WorkerWindowBudgetTicks) return false;
+            }
+            long due;
+            if (DrainRunTails != null && !stop.Requested && (options.LegacyRunWorkerForBenchmark
+                ? clock.TimestampTicks >= Interlocked.Read(ref runTailDue)
+                : (due = Volatile.Read(ref runTailDue)) != long.MaxValue && clock.TimestampTicks >= due))
+            {
+                long start = clock.TimestampTicks;
+                Interlocked.Exchange(ref runTailDue, long.MaxValue);
+                MarkWorkerActivity();
+                if (DrainRunTails()) ScheduleRunTail(start, true);
+                long spent = Math.Max(0, clock.TimestampTicks - start);
+#if LOGOS_WORKER_BENCHMARK
+                Interlocked.Increment(ref liveSummaryScans);
+                Interlocked.Add(ref liveSummaryScanTicks, spent);
+#endif
+                batchSpent = AddSaturated(batchSpent, spent);
+                windowSpent = AddSaturated(windowSpent, spent);
+                if (batchSpent >= options.WorkerBudgetTicks || windowSpent >= options.WorkerWindowBudgetTicks) return false;
+            }
             if (!stop.Requested && (Volatile.Read(ref identityTailsChanged) != 0
                 || (retryIdentityTicks != long.MaxValue && clock.TimestampTicks >= retryIdentityTicks)))
             {
                 Interlocked.Exchange(ref identityTailsChanged, 0);
                 long start = clock.TimestampTicks;
                 bool firstScan = retryIdentityTicks == long.MaxValue;
+                MarkWorkerActivity();
                 retryIdentityTicks = DrainIdentityTails() ? AddSaturated(start, TailRetryTicks) : long.MaxValue;
                 // 只为首次未排空的旧尾数留一个重试窗口，持续拒绝时恢复正常移交。
                 holdNewNormalUntilRetry = firstScan && retryIdentityTicks != long.MaxValue;
                 long spent = Math.Max(0, clock.TimestampTicks - start);
+#if LOGOS_WORKER_BENCHMARK
+                Interlocked.Increment(ref liveSummaryScans);
+                Interlocked.Add(ref liveSummaryScanTicks, spent);
+#endif
                 batchSpent = AddSaturated(batchSpent, spent);
                 windowSpent = AddSaturated(windowSpent, spent);
                 return batchSpent < options.WorkerBudgetTicks && windowSpent < options.WorkerWindowBudgetTicks;
@@ -410,13 +510,14 @@ namespace Logos
                             {
                                 if (TryDrainRepeatTail()) continue;
                                 if (DrainRepeatTail == null) return;
-                                wake.WaitOne(ToMilliseconds(Math.Max(0, Math.Min(nextTerminalTail, stop.Deadline) - clock.TimestampTicks)));
+                                WaitForInput(ToMilliseconds(Math.Max(0, Math.Min(nextTerminalTail, stop.Deadline) - clock.TimestampTicks)));
                                 continue;
                             }
                             InputProbeForTest?.Invoke(WorkerInputProbePhase.BeforeWait);
-                            wake.WaitOne(IdentityWait(Timeout.Infinite));
+                            WaitForInput(IdentityWait(Timeout.Infinite));
                             continue;
                         }
+                        MarkWorkerActivity();
                         batchSpent = 0;
                     }
                     // 在此观察到停止或丢弃截止时间后，不再开始用户调用。

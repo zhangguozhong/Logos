@@ -19,6 +19,14 @@ namespace Logos.Storage
         {
             get;
         }
+#if UNITY_EDITOR || !UNITY_5_3_OR_NEWER
+        internal bool ExactPreflightForBenchmark { get; set; }
+        internal bool LegacyTransferForBenchmark { get; set; }
+#else
+        private const bool ExactPreflightForBenchmark = false;
+        private const bool LegacyTransferForBenchmark = false;
+#endif
+        internal bool SupportsIncidentPrefixes => sanitizer is CredentialTextSanitizer;
         public int WorkspaceBytes => sanitized.Length * sizeof(char);
 
         public RecordCodec(LoggingOptions options, ILogTextSanitizer sanitizer = null)
@@ -86,21 +94,29 @@ namespace Logos.Storage
                 failure = RecordEncodeFailure.RecordTooLarge;
                 return false;
             }
-            int required =
-                72
-                + WriteUtf8.GetByteCount(record.SourceId)
-                + WriteUtf8.GetByteCount(record.EventTypeId)
-                + WriteUtf8.GetByteCount(record.RecordId)
-                + ((historical || alreadySanitized) ? WriteUtf8.GetByteCount(record.Message) : 3 * record.Message.Length)
-                + ((historical || alreadySanitized) ? WriteUtf8.GetByteCount(record.Stack) : 3 * record.Stack.Length)
-                + WriteUtf8.GetByteCount(record.Context.AppSessionId)
-                + WriteUtf8.GetByteCount(record.Context.UnityInstanceId)
-                + WriteUtf8.GetByteCount(record.Context.UnityVisitId)
-                + DiagnosticSize(record.DiagnosticMetadata);
-            if (required > 65532 || required > capacity)
+            // UTF-8 每个 UTF-16 单元最多三个字节，脱敏器也不能扩长。六个标识均在构造时限长。
+            // 上界能放下时直接编码；小切片和接近协议上限的记录仍按原规则检查，失败前不触碰目标区。
+            int diagnosticBytes = DiagnosticSize(record.DiagnosticMetadata);
+            int upperBound = 72 + diagnosticBytes + 3 * (3 * LogRecord.MaxIdLength + 3 * LogContext.MaxIdLength
+                + record.Message.Length + record.Stack.Length);
+            if (ExactPreflightForBenchmark || upperBound > capacity || upperBound > 65532)
             {
-                failure = RecordEncodeFailure.DestinationTooSmall;
-                return false;
+                int required =
+                    72
+                    + WriteUtf8.GetByteCount(record.SourceId)
+                    + WriteUtf8.GetByteCount(record.EventTypeId)
+                    + WriteUtf8.GetByteCount(record.RecordId)
+                    + ((historical || alreadySanitized) ? WriteUtf8.GetByteCount(record.Message) : 3 * record.Message.Length)
+                    + ((historical || alreadySanitized) ? WriteUtf8.GetByteCount(record.Stack) : 3 * record.Stack.Length)
+                    + WriteUtf8.GetByteCount(record.Context.AppSessionId)
+                    + WriteUtf8.GetByteCount(record.Context.UnityInstanceId)
+                    + WriteUtf8.GetByteCount(record.Context.UnityVisitId)
+                    + diagnosticBytes;
+                if (required > 65532 || required > capacity)
+                {
+                    failure = RecordEncodeFailure.DestinationTooSmall;
+                    return false;
+                }
             }
             int at = offset;
             try
@@ -121,13 +137,13 @@ namespace Logos.Storage
                 at += 8;
                 Wire.Put64(destination, at, record.Context.IdentityContextVersion);
                 at += 8;
-                WriteText(record.SourceId, destination, ref at);
-                WriteText(record.EventTypeId, destination, ref at);
-                WriteText(record.RecordId, destination, ref at);
+                WriteText(record.SourceId, destination, ref at, LegacyTransferForBenchmark);
+                WriteText(record.EventTypeId, destination, ref at, LegacyTransferForBenchmark);
+                WriteText(record.RecordId, destination, ref at, LegacyTransferForBenchmark);
                 if (historical || alreadySanitized)
                 {
-                    WriteText(record.Message, destination, ref at);
-                    WriteText(record.Stack, destination, ref at);
+                    WriteText(record.Message, destination, ref at, LegacyTransferForBenchmark);
+                    WriteText(record.Stack, destination, ref at, LegacyTransferForBenchmark);
                 }
                 else if (
                     !WriteSanitized(record.Message, destination, ref at)
@@ -138,9 +154,9 @@ namespace Logos.Storage
                     Array.Clear(destination, offset, at - offset);
                     return false;
                 }
-                WriteText(record.Context.AppSessionId, destination, ref at);
-                WriteText(record.Context.UnityInstanceId, destination, ref at);
-                WriteText(record.Context.UnityVisitId, destination, ref at);
+                WriteText(record.Context.AppSessionId, destination, ref at, LegacyTransferForBenchmark);
+                WriteText(record.Context.UnityInstanceId, destination, ref at, LegacyTransferForBenchmark);
+                WriteText(record.Context.UnityVisitId, destination, ref at, LegacyTransferForBenchmark);
                 WriteDiagnostic(record.DiagnosticMetadata, destination, ref at);
                 Wire.Put32(destination, offset, (uint)(at - offset - 4));
                 written = at - offset;
@@ -170,20 +186,41 @@ namespace Logos.Storage
             {
                 return false;
             }
-            int bytes = WriteUtf8.GetByteCount(sanitized, 0, n);
-            Wire.Put32(destination, at, (uint)bytes);
-            at += 4;
-            at += WriteUtf8.GetBytes(sanitized, 0, n, destination, at);
+#if UNITY_EDITOR || !UNITY_5_3_OR_NEWER
+            if (LegacyTransferForBenchmark)
+            {
+                int bytes = WriteUtf8.GetByteCount(sanitized, 0, n);
+                Wire.Put32(destination, at, (uint)bytes);
+                at += 4;
+                at += WriteUtf8.GetBytes(sanitized, 0, n, destination, at);
+            }
+            else
+#endif
+            {
+                int written = WriteUtf8.GetBytes(sanitized, 0, n, destination, at + 4);
+                Wire.Put32(destination, at, (uint)written);
+                at += 4 + written;
+            }
             Array.Clear(sanitized, 0, n);
             return true;
         }
 
-        private static void WriteText(string text, byte[] destination, ref int at)
+        // 容量已由调用方校验。先写 UTF-8 正文，再用编码器返回值回填长度，避免字段被再次扫描。
+        private static void WriteText(string text, byte[] destination, ref int at, bool legacy = false)
         {
-            int bytes = WriteUtf8.GetByteCount(text);
-            Wire.Put32(destination, at, (uint)bytes);
-            at += 4;
-            at += WriteUtf8.GetBytes(text, 0, text.Length, destination, at);
+#if UNITY_EDITOR || !UNITY_5_3_OR_NEWER
+            if (legacy)
+            {
+                int bytes = WriteUtf8.GetByteCount(text);
+                Wire.Put32(destination, at, (uint)bytes);
+                at += 4;
+                at += WriteUtf8.GetBytes(text, 0, text.Length, destination, at);
+                return;
+            }
+#endif
+            int written = WriteUtf8.GetBytes(text, 0, text.Length, destination, at + 4);
+            Wire.Put32(destination, at, (uint)written);
+            at += 4 + written;
         }
 
         internal static void WriteBlockContext(LogContext context, byte[] destination)

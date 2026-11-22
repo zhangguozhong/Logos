@@ -36,9 +36,11 @@ namespace Logos.Storage
         // 包括所有身份字符串、引用对象、描述符、样本及临时摘要元数据的保守上界。
         internal int WorkspaceBytes => BucketCount * (2048 + 24576);
         private readonly int coreLimit;
-        internal BoundedRepeatAggregation(int coreLimit)
+        private readonly bool consecutiveUnityInfo;
+        internal BoundedRepeatAggregation(int coreLimit, bool consecutiveUnityInfo = false)
         {
             this.coreLimit = coreLimit;
+            this.consecutiveUnityInfo = consecutiveUnityInfo;
         }
         internal bool IsEmpty
         {
@@ -60,6 +62,9 @@ namespace Logos.Storage
                 if (b.Active && (!SameScope(b.First, record) || now >= b.Deadline || freeze))
                     b.Frozen = true;
             if (freeze || prepared.SignatureLength == 0 || record.DiagnosticMetadata?.IsSynthetic == true)
+                return false;
+            // 候选模式的 Unity Info 段已经在入口定界，不能在落盘前再次跨段合并。
+            if (consecutiveUnityInfo && record.SourceId == "Unity" && record.Level == LogLevel.Info)
                 return false;
             int vacant = -1;
             for (int i = 0; i < Buckets.Length; i++)

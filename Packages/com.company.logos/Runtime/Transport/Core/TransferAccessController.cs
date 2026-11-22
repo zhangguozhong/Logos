@@ -137,6 +137,9 @@ namespace Logos.Transport
         }
         // 调用外部服务期间可能并发撤销，返回后仍须处理已被标记取消的许可。
         public bool TryStart(TransferSendPermit permit, IUploadService service, UploadRequest request)
+            => TryStart(permit, service, request, null);
+
+        internal bool TryStart(TransferSendPermit permit, IUploadService service, UploadRequest request, FileUploadSpool spool)
         {
             if (service == null || request == null)
                 throw new ArgumentNullException();
@@ -152,7 +155,9 @@ namespace Logos.Transport
             try
             {
                 if (!permit.IsCancellationRequested)
-                    accepted = service.TryStart(request, out operation);
+                    accepted = spool != null && service is FileUploadAdapter file
+                        ? file.TryPrepare(request, spool, out operation)
+                        : service.TryStart(request, out operation);
             }
             finally
             {

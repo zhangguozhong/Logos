@@ -75,6 +75,7 @@ namespace Logos.Storage
         public long ErrorBytes => quota?.ErrorBytes ?? 0;
         public bool NormalClosed => quota?.NormalClosed ?? false;
         public bool ErrorClosed => quota?.ErrorClosed ?? false;
+        internal bool HasUploadWorkspace => directoryQuota.HasUploadWorkspace;
         public DirectoryUsage DirectoryUsage => new DirectoryUsage(directoryQuota);
         public long RecoveryBlocksAuthenticated
         {
@@ -139,7 +140,7 @@ namespace Logos.Storage
             this.keys = keys ?? throw new ArgumentNullException(nameof(keys));
             this.admission = admission;
             files = fileSystem ?? new SystemJournalFileSystem();
-            directoryQuota = new DirectoryQuota(files, directory);
+            directoryQuota = new DirectoryQuota(files, directory, GetUploadFileOwner);
             this.leases = leases ?? new DirectoryLeaseProvider();
             records = new RecordCodec(new LoggingOptions());
             codec = new BlockCodec(records);
@@ -832,6 +833,7 @@ namespace Logos.Storage
             foreach (var cursor in catalogs)
                 DisposeOne(cursor, ref failure);
             DisposeOne(Clear.UnknownEntries, ref failure);
+            DisposeOne(uploadCleanup, ref failure);
             DisposeOne(recovery, ref failure);
             if (recovery?.ResourcesClosed ?? true)
                 recovery = null;

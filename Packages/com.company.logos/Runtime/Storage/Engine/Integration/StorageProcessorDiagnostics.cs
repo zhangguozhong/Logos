@@ -5,6 +5,7 @@ namespace Logos.Storage
     public sealed partial class StorageBatchProcessor
     {
         private ILogDiagnosticsSource diagnostics;
+        private IIncidentInfoCommitObserver incidentInfoObserver;
         private readonly long[] statisticsCursor = new long[32 * 6];
         private long nextStatistics;
         public void BindDiagnostics(ILogDiagnosticsSource source)
@@ -13,6 +14,11 @@ namespace Logos.Storage
                 throw new InvalidOperationException("Bind diagnostics once before worker start.");
             diagnostics = source ?? throw new ArgumentNullException(nameof(source));
             diagnosticBridge = source as IDiagnosticControlBridge;
+            if (source is IIncidentInfoCommitObserver observer && observer.ObservesIncidentInfo)
+            {
+                observer.AllowTruncatedIncidentPrefix = records.SupportsIncidentPrefixes;
+                incidentInfoObserver = observer;
+            }
         }
         private void MergeDiagnostics(long now)
         {

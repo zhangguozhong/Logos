@@ -18,7 +18,7 @@ namespace Logos
         Running, Stopping, StopTimedOut, Stopped, Faulted
     }
 
-    /// <summary>拥有一个采集器和流水线。生命周期操作在捕获的 Unity 主线程执行；
+    /// <summary>拥有显式业务日志流水线。生命周期操作在捕获的 Unity 主线程执行；
     /// TryLog 和健康查询可在任意线程执行。在 IsSafeToUnload 前必须保留此所有者。</summary>
     public sealed partial class LogosSession : ILogosSession
     {
@@ -26,11 +26,10 @@ namespace Logos
         private readonly LoggingPipeline pipeline;
         private readonly LoggingOptions initialOptions;
         private readonly PolicySnapshot initialPolicy;
-        private readonly UnityLogCollector collector;
         private readonly ILogBatchProcessor processor;
         private readonly ILogAppLifecycleReceiver lifecycleReceiver;
         private readonly int mainThreadId;
-        private bool detachRequested, collectorRemoved, disposed;
+        private bool detachRequested, disposed;
         // 旧访问接口仅在宿主首次采用 UpdateUser 前可推进匿名身份版本。
         private bool userUpdatesOwnVersion;
         private bool? hostForeground;
@@ -83,8 +82,7 @@ namespace Logos
             var device = OnMainThread ? CaptureDevice() : null;
             var context = new LogContext(null, Guid.NewGuid().ToString("N"), null, 0, device: device);
             pipelineContextId = context.UnityInstanceId;
-            pipeline = new LoggingPipeline(options, policy, context, processor, clock, generation: generation);
-            collector = new UnityLogCollector(pipeline, mainThreadId);
+            pipeline = new LoggingPipeline(options, policy, context, processor, clock, generation: generation, explicitWritesOnly: true);
             if (options.Diagnostics.Enabled && OnMainThread)
                 CaptureDiagnosticVersion();
         }
@@ -115,7 +113,7 @@ namespace Logos
         {
             if (!OnMainThread || !pipeline.Start())
                 return false;
-            if (UnityLogger.Bind(pipeline) && collector.Install())
+            if (UnityLogger.Bind(pipeline))
                 return true;
             RequestDetach(TimeSpan.Zero, true);
             return false;
@@ -216,7 +214,6 @@ namespace Logos
                 lifecycleReceiver.RequestControlCheck();
             else
             {
-                pipeline.FlushUnityRepeats();
                 lifecycleReceiver.RequestBackgroundSeal();
             }
             pipeline.NotifyControl();
@@ -238,7 +235,6 @@ namespace Logos
                 return false;
             pipeline.RequestStop(dropPending ? WorkerStopMode.DropPending : WorkerStopMode.DrainUntilDeadline, budget);
             detachRequested = true;
-            collectorRemoved = collector.Uninstall();
             UnityLogger.UnbindIfMatches(pipeline);
             Poll();
             return true;
@@ -248,10 +244,8 @@ namespace Logos
         {
             if (!OnMainThread || !detachRequested || IsSafeToUnload)
                 return State;
-            if (!collectorRemoved)
-                collectorRemoved = collector.Uninstall();
-            // 解除事件订阅只切断后续回调。仍在执行的生产者和后台线程由流水线跟踪，两侧都完成后才对外发布可卸载状态。
-            if (collectorRemoved && pipeline.IsSafeToUnload && pipeline.TryDispose())
+            // 等待已经进入流水线的显式调用归还资源，再公布可卸载状态。
+            if (pipeline.IsSafeToUnload && pipeline.TryDispose())
                 Volatile.Write(ref disposed, true);
             return State;
         }

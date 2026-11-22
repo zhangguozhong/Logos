@@ -18,16 +18,22 @@ namespace Logos
         // 从普通分区、Application 普通来源和 Info 等级三份预算同时划出同一份额度。
         private static readonly RateBudget KeyInfoRate = new RateBudget(4, 8192, 4, 8192);
         private Bucket keyInfoBucket;
+        // 高频不同 Info 也能耗尽普通分区。连续策略仅在可容纳最大合法记录的大桶内
+        // 预留两条、合计 4 KiB 的瞬时余量，Warn 仍须支付原有三层速率额度。
+        private const int WarnHeadroomCount = 2, WarnHeadroomBytes = 4096;
+        private readonly bool protectWarnings;
         private long lastTicks;
         private struct Bucket
         {
             private readonly RateBudget budget;
+            private bool hasWarnHeadroom;
             private long refillTicks;
             private double count;
             private double bytes;
             public Bucket(RateBudget budget)
             {
                 this.budget = budget;
+                hasWarnHeadroom = false;
                 refillTicks = 0;
                 count = budget.CountCapacity;
                 bytes = budget.ByteCapacity;
@@ -40,6 +46,16 @@ namespace Logos
                 bytes = Math.Min(budget.ByteCapacity, bytes + seconds * budget.BytesPerSecond);
             }
             public bool CanTake(int cost) => count >= 1 && bytes >= cost;
+            public bool CanTakeWithWarnHeadroom(int cost) => !hasWarnHeadroom ? CanTake(cost)
+                : count >= 1 + WarnHeadroomCount && bytes >= cost + (long)WarnHeadroomBytes;
+            public void EnableWarnHeadroom(int maximumPayload)
+            {
+                hasWarnHeadroom = budget.CountCapacity > WarnHeadroomCount && budget.CountsPerSecond > WarnHeadroomCount
+                    && budget.ByteCapacity - WarnHeadroomBytes >= maximumPayload && budget.BytesPerSecond > WarnHeadroomBytes;
+            }
+            // 仅已落盘的故障窗口在交付期间临时为普通 Info 留余量。小桶保留一半容量给正常流量。
+            public bool CanSpareForIncident(int cost) => count >= 1 + Math.Min(8, budget.CountCapacity / 2)
+                && bytes >= cost + (long)Math.Min(2048, budget.ByteCapacity / 2);
             public void Take(int cost)
             {
                 count -= 1;
@@ -72,6 +88,13 @@ namespace Logos
                 levels[info] = OrdinaryBucket(frozen.LevelBudgets[info]);
                 keyInfoBucket = new Bucket(KeyInfoRate);
             }
+            protectWarnings = frozen.ConsecutiveUnityInfo;
+            if (protectWarnings)
+            {
+                partitions[0].EnableWarnHeadroom(maximumPayloadBytes);
+                for (int i = 0; i < PolicySnapshot.SourceCount; i++)
+                    sources[i].EnableWarnHeadroom(maximumPayloadBytes);
+            }
             lastTicks = Math.Max(0, clock.TimestampTicks);
         }
         // 自定义小预算必须仍能接收一条最大合法记录；无法切分时关键事件走普通路径。
@@ -83,7 +106,7 @@ namespace Logos
             b.CountCapacity - KeyInfoRate.CountCapacity, b.ByteCapacity - KeyInfoRate.ByteCapacity,
             b.CountsPerSecond - KeyInfoRate.CountsPerSecond, b.BytesPerSecond - KeyInfoRate.BytesPerSecond));
 
-        public RateLimitDecision TryAcquire(LogLevel level, LogSource source, int payloadBytes, bool keyInfo = false)
+        public RateLimitDecision TryAcquire(LogLevel level, LogSource source, int payloadBytes, bool keyInfo = false, bool reserveForIncident = false)
         {
             if (level < LogLevel.Trace || level > LogLevel.Fatal || payloadBytes < 1)
                 return RateLimitDecision.InvalidInput;
@@ -112,7 +135,16 @@ namespace Logos
                 sources[sourceIndex].Refill(now);
                 levels[levelIndex].Refill(now);
                 // 三种桶都能支付才一起扣款，否则一次被来源限流的尝试也会消耗整个分区的额度。
-                if (!partitions[partition].CanTake(payloadBytes) || !sources[sourceIndex].CanTake(payloadBytes) || !levels[levelIndex].CanTake(payloadBytes))
+                bool keepHeadroom = protectWarnings && level < LogLevel.Warn;
+                bool canPay = keepHeadroom
+                    ? partitions[partition].CanTakeWithWarnHeadroom(payloadBytes) && sources[sourceIndex].CanTakeWithWarnHeadroom(payloadBytes)
+                    : partitions[partition].CanTake(payloadBytes) && sources[sourceIndex].CanTake(payloadBytes);
+                if (reserveForIncident && level == LogLevel.Info && !keyInfo
+                    && (!partitions[partition].CanSpareForIncident(payloadBytes)
+                        || !levels[levelIndex].CanSpareForIncident(payloadBytes)
+                        || (source == LogSource.Unity && !sources[sourceIndex].CanSpareForIncident(payloadBytes))))
+                    return RateLimitDecision.RateLimited;
+                if (!canPay || !levels[levelIndex].CanTake(payloadBytes))
                     return RateLimitDecision.RateLimited;
                 partitions[partition].Take(payloadBytes);
                 sources[sourceIndex].Take(payloadBytes);

@@ -9,6 +9,12 @@ namespace Logos
     {
         [SerializeField] private bool enabled = true;
         [SerializeField] private bool diagnosticsEnabled, diagnosticAggregationEnabled, diagnosticIncidentEnabled, diagnosticBudgetEnabled;
+        // 旧资产的该值仍影响普通通道的 Warn 预留，保留序列化兼容。
+        [SerializeField, HideInInspector] private bool consecutiveUnityInfo = true;
+#if UNITY_EDITOR
+        internal bool LegacyRunWorkerForBenchmark { get; set; }
+        internal bool LegacyRepeatSummaryForBenchmark { get; set; }
+#endif
         [SerializeField] private int diagnosticVersion = 1;
         [SerializeField] private int minimumLevel = (int)LogLevel.Info;
         [SerializeField] private int normalQueueCount = 512, errorQueueCount = 128;
@@ -32,6 +38,11 @@ namespace Logos
                 var values = new LoggingOptions
                 {
                     Diagnostics = new DiagnosticOptions { Version = diagnosticVersion, Enabled = diagnosticsEnabled, AggregationEnabled = diagnosticAggregationEnabled, IncidentEnabled = diagnosticIncidentEnabled, BudgetEnabled = diagnosticBudgetEnabled },
+                    ConsecutiveUnityInfo = consecutiveUnityInfo,
+#if UNITY_EDITOR
+                    LegacyRunWorkerForBenchmark = LegacyRunWorkerForBenchmark,
+                    LegacyRepeatSummaryForBenchmark = LegacyRepeatSummaryForBenchmark,
+#endif
                     NormalQueueCount = normalQueueCount,
                     ErrorQueueCount = errorQueueCount,
                     NormalQueueBytes = normalQueueBytes,

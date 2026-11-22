@@ -56,8 +56,9 @@ namespace Logos.Transport
                     return false;
                 }
             }
-            if (!CloseExporter())
+            if (!FinishFileRecovery(now: lastNow) || !CloseExporter())
                 return false;
+            fileSpool?.CloseRecovery();
             ResetAttempt();
             Array.Clear(admitted, 0, admitted.Length);
             disposed = true;
@@ -72,7 +73,7 @@ namespace Logos.Transport
         {
             CheckOwner();
             lastNow = now;
-            long work = ExecutionDelayTicks100ns(now);
+            long work = Math.Min(ExecutionDelayTicks100ns(now), FileRecoveryDelay(now));
             if (disposed || stopping || clearing || current == null || !time.TryUtc(now, out var utc))
                 return work;
             long expiry = utc < current.ExpiresUtc ? current.ExpiresUtc.Ticks - utc.Ticks : ready ? 0 : long.MaxValue;
@@ -142,6 +143,8 @@ namespace Logos.Transport
                 return ready ? 0 : long.MaxValue;
             if (ackSlot >= 0 || settling)
                 return 0;
+            if (FileSpoolUnavailable)
+                return FileRecoveryDelay(now);
             for (int i = 0; i < 3; i++)
                 if (admitted[i] != null)
                     return 0;
@@ -164,29 +167,40 @@ namespace Logos.Transport
                 return nextAutoProbe > now ? nextAutoProbe - Math.Max(0, now) : 0;
             return long.MaxValue;
         }
-        internal bool OperationsClosed => permit == null && exporter == null;
+        internal bool OperationsClosed => permit == null && exporter == null && fileRecovery == null;
         internal void SetBackground(bool value)
         {
-            background = value;
+            lock (publication)
+            {
+                background = value;
+            }
         }
         internal void RequestStop()
         {
-            stopping = true;
-            ready = false;
-            access.SetCoordinatorGate(false, 0);
+            lock (publication)
+            {
+                stopping = true;
+                ready = false;
+                access.SetCoordinatorGate(false, 0);
+            }
         }
         internal void CloseForClear()
         {
-            clearMemoryDrained = false;
-            clearing = true;
-            ready = false;
-            access.SetCoordinatorGate(false, 0);
+            lock (publication)
+            {
+                clearMemoryDrained = false;
+                clearing = true;
+                ready = false;
+                access.SetCoordinatorGate(false, 0);
+            }
         }
         internal bool ClearMemoryReady => clearing && clearMemoryDrained && OperationsClosed;
         private void DrainClosedClearMemory()
         {
             if (!clearing || !OperationsClosed || clearMemoryDrained)
                 return;
+            // 后台扫描已退出，交还跨页游标后再让存储模块接管清理。
+            fileSpool?.CloseRecovery();
             // 上传正文保持借用，直到实际许可和导出器都关闭。
             Array.Clear(admitted, 0, admitted.Length);
             Array.Clear(admittedRevision, 0, admittedRevision.Length);
@@ -394,7 +408,7 @@ namespace Logos.Transport
                     bool accepted = false;
                     try
                     {
-                        accepted = access.TryStart(permit, service, upload);
+                        accepted = access.TryStart(permit, service, upload, fileSpool);
                     }
                     catch (Exception ex) when (!(ex is OutOfMemoryException))
                     {
@@ -635,7 +649,7 @@ namespace Logos.Transport
             }
         }
         // 网络结果可先于请求资源释放出现，协调器还要驱动实际关闭才能结算任务。
-        private void DriveOperation(long now)
+        private void DriveOperation(long now, JournalStepContext context, IMonotonicClock liveClock)
         {
             if (now < nextProbe || now == long.MaxValue && lastProbe == long.MaxValue)
                 return;
@@ -661,6 +675,11 @@ namespace Logos.Transport
                 {
                     try
                     {
+                        if (permit.Operation is FileUploadAdapter.Operation file && file.ReadyToDispatch)
+                        {
+                            if (!DispatchFile(file, now, context, liveClock))
+                                return;
+                        }
                         if (permit.TryGetResult(out result))
                         {
                             if (result == null)

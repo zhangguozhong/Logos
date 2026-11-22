@@ -8,24 +8,32 @@ namespace Logos
     {
         // 每组容量必须是 2 的幂。生产者最多探测一组，worker 的访问位图覆盖两组。
         private const int RepeatSlotCount = 8;
-        private const int MaxRepeatText = 72;
+        private const int LegacyRepeatText = 72;
+        // GUID 前缀(33)、四个非负 Int64(各 19) 和三个空格。
+        private const int MaxRepeatText = 33 + 4 * 19 + 3;
+        // s + 首条序号 + 空格 + 增量 + 空格 + 带符号的 UTC tick 差值。
+        internal const int MaxRunText = 1 + 19 + 1 + 19 + 1 + 20;
+        private readonly int repeatSummaryChars;
         private readonly RepeatSlot[] repeatSlots;
         private DiagnosticControlState terminalRepeatControl;
         private long coalescedUnityInfo, recoveredUnityInfoObservations, unityRepeatSummaryAttempts;
+#if LOGOS_WORKER_BENCHMARK
+        private long liveSummaryAttempts, stopSummaryAttempts;
+#endif
 
-        private sealed class RepeatSlot
+        private class RepeatSlot
         {
             // 槽位只弱引用首条正文和堆栈，避免为了识别重复而延长原文本的寿命。任一文本已被回收时，匹配会失败。
             private readonly WeakReference<string> message = new WeakReference<string>(null);
             private readonly WeakReference<string> stack = new WeakReference<string>(null);
             private int owner;
             internal DiagnosticControlState Origin;
-            internal long FirstSequence, Delta, LastAttempt;
+            internal long FirstSequence, Delta, LastAttempt, LastUtcTicks;
             internal int FirstQueueSlot;
             internal long FailedEvictionAt = -TimeSpan.TicksPerSecond;
             internal QuotaDayTag? Tag;
 
-            internal DateTime PendingUtc;
+            internal DateTime FirstUtc;
             internal long PendingTicks, PendingCount;
             internal bool HasPendingFirst => PendingCount != 0;
 
@@ -39,7 +47,7 @@ namespace Logos
                 }
                 FirstSequence = Delta = 0;
                 PendingCount = 1;
-                PendingUtc = DateTime.UtcNow;
+                FirstUtc = DateTime.UtcNow;
                 PendingTicks = ticks;
                 Tag = tag;
                 Origin = control;
@@ -63,9 +71,16 @@ namespace Logos
                 message.TryGetTarget(out var previous) && string.Equals(text, previous, StringComparison.Ordinal)
                 && stack.TryGetTarget(out var previousStack) && string.Equals(trace, previousStack, StringComparison.Ordinal);
 
+            internal void ObserveRepeat(bool timed)
+            {
+                if (timed) LastUtcTicks = DateTime.UtcNow.Ticks;
+                if (Delta < long.MaxValue) Delta++;
+            }
+
             internal void Remember(LogRecord record, DiagnosticControlState control, long repeats, long now, int queueSlot)
             {
                 FirstSequence = record.Sequence;
+                FirstUtc = record.UtcTimestamp;
                 FirstQueueSlot = queueSlot;
                 Delta = repeats;
                 PendingCount = 0;
@@ -76,6 +91,49 @@ namespace Logos
                 stack.SetTarget(record.Stack);
                 LastAttempt = now;
             }
+        }
+
+        private long runObservation;
+        private RunSlot activeRun;
+
+        private sealed class RunSlot : RepeatSlot
+        {
+            internal long Observation;
+        }
+
+        private RunSlot EnterRunSlot(string message, string stack, DiagnosticControlState control, QuotaDayTag? tag,
+            long observation, out bool matched)
+        {
+            matched = false;
+            if (repeatSlots == null || message == null || message.Length > options.MaxMessageChars
+                || (stack != null && stack.Length > options.MaxStackChars)) return null;
+            var previous = Volatile.Read(ref activeRun);
+            if (previous != null && previous.TryEnter())
+            {
+                if (previous.Observation == unchecked(observation - 1) && previous.SameScope(control, tag)
+                    && previous.Matches(message, stack ?? string.Empty))
+                {
+                    matched = true;
+                    return previous;
+                }
+                if (previous.Delta == 0) return previous;
+                previous.Exit();
+            }
+            // 未发布的尾数保留在固定槽中。没有可用槽时照常采集新首条。
+            foreach (RunSlot slot in repeatSlots)
+            {
+                if (ReferenceEquals(slot, previous) || !slot.TryEnter()) continue;
+                if (slot.Delta == 0) return slot;
+                slot.Exit();
+            }
+            return null;
+        }
+
+        private void CountRun(RunSlot run, long observation)
+        {
+            run.Observation = observation;
+            run.ObserveRepeat(true);
+            if (run.Delta == 1) worker.ScheduleRunTail(clock.TimestampTicks);
         }
 
         private RepeatSlot EnterRepeatSlot(string message, string stack, DiagnosticControlState control, QuotaDayTag? tag, out bool matched, bool allowEviction = true)
@@ -170,8 +228,7 @@ namespace Logos
 
         private void CountRepeat(RepeatSlot slot)
         {
-            if (slot.Delta < long.MaxValue)
-                slot.Delta++;
+            slot.ObserveRepeat(!options.LegacyRepeatSummaryForBenchmark);
             long now = clock.TimestampTicks;
             if (now - slot.LastAttempt >= TimeSpan.TicksPerSecond)
             {
@@ -245,14 +302,40 @@ namespace Logos
             if (slot.Delta == 0)
                 return AdmissionReason.Accepted;
             Interlocked.Increment(ref unityRepeatSummaryAttempts);
-            var result = TryAcceptCore(LogLevel.Info, LogSource.Unity, null, null, "logos.unity.repeat", null, null, false, false, false, slot, terminal,
+#if LOGOS_WORKER_BENCHMARK
+            if (terminal) Interlocked.Increment(ref stopSummaryAttempts);
+            else Interlocked.Increment(ref liveSummaryAttempts);
+#endif
+            var result = TryAcceptCore(LogLevel.Info, LogSource.Unity, null, null, slot is RunSlot ? "logos.unity.run" : "logos.unity.repeat", null, null, false, false, false, slot, terminal,
                 originalUser ? slot.Origin.Context : null);
             if (result.IsAccepted) slot.Delta = 0;
             return result.Reason;
         }
 
-        private string FormatRepeatSummary(RepeatSlot slot) => recordPrefix + slot.FirstSequence.ToString(CultureInfo.InvariantCulture)
-            + " " + slot.Delta.ToString(CultureInfo.InvariantCulture);
+        internal static string FormatRunSummary(long sequence, long delta, long utcOffset)
+        {
+            Span<char> text = stackalloc char[MaxRunText];
+            text[0] = 's';
+            int offset = 1;
+            sequence.TryFormat(text.Slice(offset), out int written, provider: CultureInfo.InvariantCulture);
+            offset += written;
+            text[offset++] = ' ';
+            delta.TryFormat(text.Slice(offset), out written, provider: CultureInfo.InvariantCulture);
+            offset += written;
+            text[offset++] = ' ';
+            utcOffset.TryFormat(text.Slice(offset), out written, provider: CultureInfo.InvariantCulture);
+            return text.Slice(0, offset + written).ToString();
+        }
+
+        private string FormatRepeatSummary(RepeatSlot slot)
+        {
+            if (slot is RunSlot)
+                return FormatRunSummary(slot.FirstSequence, slot.Delta, slot.LastUtcTicks - slot.FirstUtc.Ticks);
+            return recordPrefix + slot.FirstSequence.ToString(CultureInfo.InvariantCulture)
+                + " " + slot.Delta.ToString(CultureInfo.InvariantCulture)
+                + (options.LegacyRepeatSummaryForBenchmark ? string.Empty : " " + slot.FirstUtc.Ticks.ToString(CultureInfo.InvariantCulture)
+                    + " " + slot.LastUtcTicks.ToString(CultureInfo.InvariantCulture));
+        }
 
         internal void FlushUnityRepeats() => FlushUnityRepeats(false);
 
@@ -263,6 +346,8 @@ namespace Logos
         {
             if (repeatSlots == null) return false;
             bool retry = false;
+            DiagnosticControlState limitedOrigin = null;
+            QuotaDayTag? limitedTag = null;
             foreach (var slot in repeatSlots)
             {
                 if (!slot.TryEnter())
@@ -272,8 +357,22 @@ namespace Logos
                 }
                 try
                 {
-                    bool retired = terminal && IsIdentityTail(slot, terminalRepeatControl);
-                    retry |= RetryableTail(SubmitRepeatSummary(slot, terminal, retired));
+                    // 同一轮同域连续段摘要支付相同的 Unity Info 额度。保留尾数到原定的下一轮。
+                    if (limitedOrigin != null && ReferenceEquals(limitedOrigin, slot.Origin)
+                        && Nullable.Equals(limitedTag, slot.Tag)) continue;
+                    bool retired = (terminal || slot is RunSlot) && IsIdentityTail(slot, terminal ? terminalRepeatControl : Volatile.Read(ref diagnosticControl));
+                    var reason = SubmitRepeatSummary(slot, terminal, retired);
+                    if (RetryableTail(reason))
+                    {
+                        retry = true;
+                        if (reason == AdmissionReason.RateLimited && slot is RunSlot
+                            && !options.LegacyRunWorkerForBenchmark && worker.IsWorkerThread)
+                        {
+                            limitedOrigin = slot.Origin;
+                            limitedTag = slot.Tag;
+                        }
+                    }
+                    else if (slot is RunSlot && reason != AdmissionReason.Stopping) slot.Delta = 0;
                 }
                 finally { slot.Exit(); }
             }

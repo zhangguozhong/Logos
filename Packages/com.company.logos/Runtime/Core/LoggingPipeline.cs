@@ -28,36 +28,46 @@ namespace Logos
         {
             get;
         }
-        internal LoggingPipeline(LoggingOptions options, PolicySnapshot policy, LogContext context, ILogBatchProcessor processor, IMonotonicClock clock = null, long generation = 1)
+        internal LoggingPipeline(LoggingOptions options, PolicySnapshot policy, LogContext context, ILogBatchProcessor processor, IMonotonicClock clock = null, long generation = 1, bool explicitWritesOnly = false)
         {
             if (generation < 1)
                 throw new ArgumentOutOfRangeException(nameof(generation));
             this.options = (options ?? throw new ArgumentNullException(nameof(options))).Freeze();
-            // 自动 Info 摘要需要能容纳首条标识和次数。如果文本或记录上限太小，保留普通采集路径，避免制造永远无法入队的摘要。
-            if (!this.options.Diagnostics.Enabled && this.options.MaxMessageChars >= MaxRepeatText
-                && this.options.EffectiveRecordByteLimit >= LoggingOptions.FixedRecordBytes + 2 * MaxRepeatText)
+            // 自动 Info 摘要需要能容纳首条标识、次数和观测时间。如果文本或记录上限太小，保留普通采集路径，避免制造永远无法入队的摘要。
+            repeatSummaryChars = this.options.ConsecutiveUnityInfo ? MaxRunText
+                : this.options.LegacyRepeatSummaryForBenchmark ? LegacyRepeatText : MaxRepeatText;
+            if (!explicitWritesOnly && (this.options.ConsecutiveUnityInfo || !this.options.Diagnostics.Enabled) && this.options.MaxMessageChars >= repeatSummaryChars
+                && this.options.EffectiveRecordByteLimit >= LoggingOptions.FixedRecordBytes + 2 * repeatSummaryChars)
             {
                 repeatSlots = new RepeatSlot[2 * RepeatSlotCount];
                 for (int i = 0; i < repeatSlots.Length; i++)
-                    repeatSlots[i] = new RepeatSlot();
+                    repeatSlots[i] = this.options.ConsecutiveUnityInfo ? new RunSlot() : new RepeatSlot();
             }
             this.policy = new AdmissionPolicy(policy ?? throw new ArgumentNullException(nameof(policy)));
             if (context == null) throw new ArgumentNullException(nameof(context));
             instanceId = context.UnityInstanceId;
             Generation = generation;
             diagnosticControl = new DiagnosticControlState(generation, 0, 0, context, 0, null, this.options.Diagnostics.Enabled, this.options.Diagnostics.BudgetEnabled);
+            if (this.options.EffectiveIncidentInfoContext && repeatSlots != null && processor is IIncidentInfoDurableProcessor)
+            {
+                incidentInfo = new IncidentInfoWindow(diagnosticControl);
+                publishIncidentEntry = PublishIncidentEntry;
+            }
             this.clock = clock ?? new StopwatchClock();
             recordPrefix = Guid.NewGuid().ToString("N") + "-";
             rateLimiter = new RateLimiter(this.options, this.clock);
-            queue = new BoundedLogQueue(this.options, generation);
+            queue = new BoundedLogQueue(this.options, generation, incidentInfo != null);
             // 缺少处理器明确表示流水线尚未就绪；不创建线程或信号句柄。
             if (processor != null)
             {
                 worker = new BackgroundLogWorker(queue, this.options, processor, this.clock) { Producers = producerRegistry };
+                worker.IncidentWindow = incidentInfo;
+                if (incidentInfo != null) worker.DrainIncident = DrainIncidentEntries;
                 if (repeatSlots != null)
                 {
                     worker.DrainRepeatTail = () => FlushUnityRepeats(true);
                     worker.DrainIdentityTails = DrainIdentityTails;
+                    if (this.options.ConsecutiveUnityInfo) worker.DrainRunTails = () => FlushUnityRepeats(false);
                 }
             }
             if (processor is ILogDiagnosticsReceiver receiver)
@@ -98,6 +108,8 @@ namespace Logos
                 policy.Replace(snapshot);
                 UpdateDiagnosticControl(true, false, null, null);
             }
+            // 频繁准入也使用生命周期门，等待后台擦除必须放在门外。
+            incidentInfo?.Reset(ReadControlState());
             NotifyControl();
         }
         // 生命周期标记复用现有工作线程信号。生命周期门锁阻止释放后继续发信号。
@@ -136,6 +148,8 @@ namespace Logos
                 UpdateDiagnosticControl(false, true, value, null);
                 if (changed && repeatSlots != null) worker?.MarkIdentityTails();
             }
+            // 频繁准入也使用生命周期门，等待后台擦除必须放在门外。
+            incidentInfo?.Reset(ReadControlState());
             NotifyControl();
             return true;
         }
@@ -188,6 +202,10 @@ namespace Logos
         private AdmissionResult TryAcceptCore(LogLevel level, LogSource source, string message, string stack, string eventTypeId,
             long? expectedGeneration, DiagnosticRecordMetadata diagnosticMetadata, bool diagnosticCall, bool keyInfo, bool automaticInfo, RepeatSlot summary, bool terminal = false, LogContext capturedContext = null)
         {
+            // 全部外部观测共用序号。任何拒绝或争用都会留下间隔，内部摘要不占号。
+            bool externalRun = repeatSlots != null && options.ConsecutiveUnityInfo && summary == null;
+            long observation = externalRun ? Interlocked.Increment(ref runObservation) : 0;
+            long incidentObservation = 0;
             // 无效等级和 Off 使用固定诊断桶（Trace），不创建动态维度。
             LogLevel bucket = level >= LogLevel.Trace && level <= LogLevel.Fatal ? level : LogLevel.Trace;
             counters.Add(HealthMetric.Attempted, bucket);
@@ -211,6 +229,13 @@ namespace Logos
                         result = new AdmissionResult(AdmissionReason.StaleGeneration);
                     else
                     {
+                        if (incidentInfo != null && externalRun)
+                        {
+                            // 与切号使用同一把门。旧句柄不消耗新身份的位置，内部摘要不占号。
+                            controlView = diagnosticControl;
+                            if (capturedContext == null || ReferenceEquals(capturedContext, controlView.Context))
+                                incidentObservation = controlView.NextIncidentObservation();
+                        }
                         producers++;
                         producerRegistry.Enter();
                         entered = true;
@@ -220,7 +245,7 @@ namespace Logos
                 if (!entered)
                     return result;
                 // 先登记活跃生产者，再离开生命周期锁取得本次记录所用的上下文。即使关闭并发发生，清理方也必须等这次调用归还资源。
-                controlView = terminal ? terminalRepeatControl : Volatile.Read(ref diagnosticControl);
+                if (controlView == null) controlView = terminal ? terminalRepeatControl : Volatile.Read(ref diagnosticControl);
                 DiagnosticBudgetSnapshot budgetView = Volatile.Read(ref diagnosticBudget);
                 PolicySnapshot policyView = policy.Snapshot;
                 LogContext contextView = capturedContext ?? controlView.Context;
@@ -241,14 +266,16 @@ namespace Logos
                     ? !summary.SameScope(controlView, quotaTag)
                     : summary.Origin.PolicyRevision != controlView.PolicyRevision || !Nullable.Equals(summary.Tag, quotaTag)))
                     return result = new AdmissionResult(AdmissionReason.StaleGeneration);
-                int memoryBytes = policy.EstimateRecordBytes(options, summary != null ? MaxRepeatText : message?.Length ?? 0, stack?.Length ?? 0, diagnosticMetadata);
+                int memoryBytes = policy.EstimateRecordBytes(options, summary != null ? repeatSummaryChars : message?.Length ?? 0, stack?.Length ?? 0, diagnosticMetadata);
                 if (memoryBytes > options.EffectiveRecordByteLimit)
                     return result = new AdmissionResult(AdmissionReason.RecordTooLarge);
                 if (options.Diagnostics.Enabled && options.Diagnostics.BudgetEnabled && !AcceptDiagnosticBudget(controlView, budgetView, quotaTag, level, source, eventTypeId, memoryBytes, diagnosticCall))
                     return result = new AdmissionResult(AdmissionReason.Filtered);
                 if (automaticInfo && level == LogLevel.Info && source == LogSource.Unity && ReferenceEquals(controlView.Context, contextView))
                 {
-                    repeatSlot = EnterRepeatSlot(message, stack, controlView, quotaTag, out coalesced);
+                    repeatSlot = options.ConsecutiveUnityInfo
+                        ? EnterRunSlot(message, stack, controlView, quotaTag, observation, out coalesced)
+                        : EnterRepeatSlot(message, stack, controlView, quotaTag, out coalesced);
                     if (coalesced && repeatSlot.HasPendingFirst)
                     {
                         coalesced = false;
@@ -261,15 +288,23 @@ namespace Logos
                     }
                     if (coalesced)
                     {
-                        CountRepeat(repeatSlot);
+                        if (repeatSlot is RunSlot run)
+                            CountRun(run, observation);
+                        else
+                            CountRepeat(repeatSlot);
                         return result = new AdmissionResult(AdmissionReason.Filtered);
                     }
                 }
-                RateLimitDecision rate = rateLimiter.TryAcquire(level, source, LoggingOptions.RatePayloadBytes(memoryBytes), keyInfo);
+                RateLimitDecision rate = rateLimiter.TryAcquire(level, source, LoggingOptions.RatePayloadBytes(memoryBytes), keyInfo, incidentInfo != null && incidentInfo.HasConfirmedWindow);
                 if (rate != RateLimitDecision.Granted)
                 {
                     if (rate == RateLimitDecision.ContentionRejected)
                         return result = AdmissionResult.ContentionRejectedAt(AdmissionStage.RateLimit);
+                    if (rate == RateLimitDecision.RateLimited && incidentInfo != null && automaticInfo && summary == null
+                        && recovered == 0 && !keyInfo && level == LogLevel.Info && source == LogSource.Unity
+                        && incidentObservation > 0
+                        && incidentInfo.TryCapture(controlView, quotaTag, incidentObservation, clock.TimestampTicks, DateTime.UtcNow, message))
+                        worker.NotifyWork();
                     return result = new AdmissionResult(rate == RateLimitDecision.RateLimited ? AdmissionReason.RateLimited : AdmissionReason.InvalidInput);
                 }
                 // 先占用保守估算的队列容量，再复制和构造记录。提交前的任何退出都要归还预留；已经使用的速率额度保持扣除。
@@ -292,7 +327,8 @@ namespace Logos
                 long number = Interlocked.Increment(ref sequence);
                 if (number <= 0)
                     throw new InvalidOperationException("Pipeline sequence exhausted.");
-                var record = new LogRecord(level, SourceName(source), eventTypeId, recordPrefix, number, recovered == 0 ? DateTime.UtcNow : repeatSlot.PendingUtc,
+                var utc = recovered == 0 || !options.LegacyRepeatSummaryForBenchmark ? DateTime.UtcNow : repeatSlot.FirstUtc;
+                var record = new LogRecord(level, SourceName(source), eventTypeId, recordPrefix, number, recovered == 0 ? utc : repeatSlot.FirstUtc,
                     recovered == 0 ? timestamp : repeatSlot.PendingTicks,
                     boundedMessage, boundedStack, contextView, messageTruncated, stackTruncated, token.QuotaDayTag, true, diagnosticMetadata);
                 bool retiringTail = summary != null && capturedContext != null && !terminal;
@@ -301,13 +337,24 @@ namespace Logos
                 if (commit != QueueDecision.Committed)
                     return result = MapQueue(commit, AdmissionStage.QueueCommit, quotaReason);
                 reserved = false;
+                if (incidentInfo != null && summary == null && level >= LogLevel.Error
+                    && incidentObservation > 0 && Nullable.Equals(quotaTag, token.QuotaDayTag)
+                    && incidentInfo.TryTrigger(controlView, token.QuotaDayTag, incidentObservation, timestamp, number))
+                    worker.NotifyWork();
                 repeatSlot?.Remember(record, controlView, recovered, timestamp, token.Slot);
+                if (recovered != 0) repeatSlot.LastUtcTicks = utc.Ticks;
+                if (repeatSlot is RunSlot first)
+                {
+                    first.Observation = observation;
+                    Volatile.Write(ref activeRun, first);
+                }
                 if (recovered != 0) Interlocked.Add(ref recoveredUnityInfoObservations, recovered);
                 result = new AdmissionResult(AdmissionReason.Accepted);
                 // 即使消费者先于本次递增完成，也要统计成功的所有权转移。
                 counters.Add(HealthMetric.Accepted, bucket);
                 // 切号摘要由正在探测队列的工作线程提交；只有外部生产者需要唤醒它。
-                if (!terminal && !(summary != null && capturedContext != null)) worker.NotifyWork();
+                if (!terminal && (summary == null || (capturedContext == null
+                    && (options.LegacyRunWorkerForBenchmark || !worker.IsWorkerThread)))) worker.NotifyWork();
                 return result;
             }
             catch (Exception)
@@ -319,7 +366,7 @@ namespace Logos
             }
             finally
             {
-                if (result.Reason == AdmissionReason.ContentionRejected)
+                if (!options.ConsecutiveUnityInfo && result.Reason == AdmissionReason.ContentionRejected)
                 {
                     // 普通准入失败后仅再探测一圈。可以借用已提交的同域首条，
                     // 或暂存待准入的观测；不驱逐、不重取额度，也不再次提交队列。
@@ -331,7 +378,7 @@ namespace Logos
                     {
                         if (repeatSlot.Delta < long.MaxValue)
                         {
-                            repeatSlot.Delta++;
+                            repeatSlot.ObserveRepeat(!options.LegacyRepeatSummaryForBenchmark);
                             Interlocked.Increment(ref recoveredUnityInfoObservations);
                         }
                     }
@@ -441,6 +488,7 @@ namespace Logos
                     state = PipelineCompletion.Stopping;
                 worker?.RequestStop(mode, deadlineTicks);
             }
+            incidentInfo?.Reset(null);
         }
         private void ObserveFault()
         {
@@ -471,8 +519,9 @@ namespace Logos
                 disposed = true;
                 if (state != PipelineCompletion.Faulted)
                     state = PipelineCompletion.Stopped;
-                return true;
             }
+            incidentInfo?.Reset(null);
+            return true;
         }
         public void Dispose()
         {
@@ -487,7 +536,15 @@ namespace Logos
             long filteredInfo = result.Get(HealthMetric.Filtered, LogLevel.Info, AdmissionReason.Filtered);
             result.Set(HealthMetric.Filtered, LogLevel.Info, filteredInfo + result.CoalescedUnityInfo, AdmissionReason.Filtered);
             result.RecoveredUnityInfoObservations = Interlocked.Read(ref recoveredUnityInfoObservations);
+            result.IncidentInfoAttempts = Interlocked.Read(ref incidentInfoAttempts);
+            result.IncidentInfoTransferred = Interlocked.Read(ref incidentInfoTransferred);
+            result.IncidentInfoMissed = incidentInfo?.Missed ?? 0;
             result.UnityRepeatSummaryAttempts = Interlocked.Read(ref unityRepeatSummaryAttempts);
+#if LOGOS_WORKER_BENCHMARK
+            result.LiveSummaryAttempts = Interlocked.Read(ref liveSummaryAttempts);
+            result.StopSummaryAttempts = Interlocked.Read(ref stopSummaryAttempts);
+            worker?.CopyBenchmarkCounters(result);
+#endif
             QueueSnapshot queued = queue.Snapshot();
             WorkerSnapshot consumed = worker?.Snapshot();
             result.CompletionKind = consumed?.CompletionKind ?? PipelineCompletionKind.SynchronousConsumedForTest;

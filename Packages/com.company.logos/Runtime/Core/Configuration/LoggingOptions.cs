@@ -32,6 +32,23 @@ namespace Logos
         // 保守估算托管成本：记录、上下文、队列槽位、六个有界 ID 和字符串头。
         // 载荷按 UTF-16 计费，而非编码后的 UTF-8。这是预算估算，不是堆内存遥测。
         public const int FixedRecordBytes = 2048;
+        /// <summary>默认仅合并连续重复的普通 Unity Info。关闭后使用跨段匹配策略。</summary>
+        public bool ConsecutiveUnityInfo { get; set; } = true;
+        /// <summary>显式开启故障窗口，在普通队列预算内暂存因入口限流未入队的短消息。</summary>
+        public bool IncidentInfoContext { get; set; }
+        internal const int IncidentReservedSlots = 40, IncidentReservedBytes = 32 * 1024;
+        // 即使划出固定窗口，普通分区仍须可接收一个最大合法记录。
+        internal bool EffectiveIncidentInfoContext => IncidentInfoContext && ConsecutiveUnityInfo
+            && MaxMessageChars >= LoggingPipeline.MaxRunText
+            && EffectiveRecordByteLimit >= FixedRecordBytes + 2 * LoggingPipeline.MaxRunText
+            && NormalQueueCount > IncidentReservedSlots && NormalQueueBytes - IncidentReservedBytes >= EffectiveRecordByteLimit;
+#if UNITY_EDITOR || !UNITY_5_3_OR_NEWER
+        internal bool LegacyRepeatSummaryForBenchmark { get; set; }
+        internal bool LegacyRunWorkerForBenchmark { get; set; }
+#else
+        internal bool LegacyRepeatSummaryForBenchmark => false;
+        internal bool LegacyRunWorkerForBenchmark => false;
+#endif
         public DiagnosticOptions Diagnostics
         {
             get;

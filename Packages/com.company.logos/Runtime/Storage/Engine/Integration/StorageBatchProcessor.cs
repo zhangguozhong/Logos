@@ -3,7 +3,7 @@ using System.Threading;
 namespace Logos.Storage
 {
     /// <summary>单工作线程的有界存储所有者。构造仅分配；所有 I/O 都属于 Step。</summary>
-    public sealed partial class StorageBatchProcessor : IBufferedLogBatchProcessor, IClearMemoryBarrier, ILogDiagnosticsReceiver, ILogAppLifecycleReceiver
+    public sealed partial class StorageBatchProcessor : IIncidentInfoDurableProcessor, IClearMemoryBarrier, ILogAppLifecycleReceiver
     {
         private readonly JournalSession journal;
         private readonly StorageIoMeasurements io;
@@ -27,6 +27,18 @@ namespace Logos.Storage
         private bool appendUncertainNormal, appendUncertainError;
         private long nextWake;
         private StorageHealthSnapshot health;
+#if UNITY_EDITOR || !UNITY_5_3_OR_NEWER
+        internal bool ExactPreflightForBenchmark
+        {
+            get => records.ExactPreflightForBenchmark;
+            set => records.ExactPreflightForBenchmark = value;
+        }
+        internal bool LegacyTransferForBenchmark
+        {
+            get => records.LegacyTransferForBenchmark;
+            set => records.LegacyTransferForBenchmark = value;
+        }
+#endif
         public long NextWakeTicks => Interlocked.Read(ref nextWake);
         public int FixedWorkspaceBytes => journal.FixedWorkspaceBytes + records.WorkspaceBytes + blocks.WorkspaceBytes
             + normal.WorkspaceBytes + error.WorkspaceBytes + normal.ControlPayloadBytes + error.ControlPayloadBytes
@@ -70,7 +82,7 @@ namespace Logos.Storage
                     if (loggingOptions.Diagnostics.AggregationEnabled || loggingOptions.Diagnostics.IncidentEnabled)
                         prepared = new PreparedRecordSlot();
                     if (loggingOptions.Diagnostics.AggregationEnabled)
-                        aggregation = new BoundedRepeatAggregation(loggingOptions.EffectiveRecordByteLimit);
+                        aggregation = new BoundedRepeatAggregation(loggingOptions.EffectiveRecordByteLimit, loggingOptions.ConsecutiveUnityInfo);
                     if (loggingOptions.Diagnostics.IncidentEnabled)
                         incident = new BoundedIncidentContext(loggingOptions.EffectiveRecordByteLimit);
                 }
@@ -210,7 +222,12 @@ namespace Logos.Storage
             {
                 var token = staging.TokenAt(i);
                 if (!token.IsSynthetic)
-                    NotifyRecordTerminal(staging.SequenceAt(i), kind, committed ? AdmissionReason.Accepted : reason, null);
+                {
+                    long recordSequence = staging.SequenceAt(i);
+                    NotifyRecordTerminal(recordSequence, kind, committed ? AdmissionReason.Accepted : reason, null);
+                    if (incidentInfoObserver != null && staging == error)
+                        incidentInfoObserver.ResolveIncidentTrigger(recordSequence, committed);
+                }
                 ResolveToken(token, reason, committed);
             }
             if (direct == 0)
