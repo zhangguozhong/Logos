@@ -1,0 +1,7 @@
+{
+  "name": "Logos.BasicCapture",
+  "references": [
+    "Logos"
+  ],
+  "noEngineReferences": false
+}

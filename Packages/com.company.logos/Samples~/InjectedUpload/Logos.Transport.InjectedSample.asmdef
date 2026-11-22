@@ -1,0 +1,8 @@
+{
+  "name": "Logos.Transport.InjectedSample",
+  "rootNamespace": "Logos.Transport.Samples",
+  "references": [
+    "Logos"
+  ],
+  "noEngineReferences": false
+}

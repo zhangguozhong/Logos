@@ -1,0 +1,8 @@
+{
+  "name": "Logos.LocalJournal",
+  "rootNamespace": "Logos.Storage.Samples",
+  "references": [
+    "Logos"
+  ],
+  "noEngineReferences": false
+}

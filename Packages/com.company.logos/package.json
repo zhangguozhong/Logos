@@ -1,0 +1,24 @@
+{
+  "name": "com.company.logos",
+  "version": "0.4.0-preview.1",
+  "displayName": "Logos",
+  "description": "Unity 日志自动采集、分级、有界后台处理、加密日志留存与按需回捞，支持注入上传服务。",
+  "unity": "2022.3",
+  "samples": [
+    {
+      "displayName": "Basic Capture",
+      "description": "Explicit initialization, six-level API and Unity automatic capture with a counting processor. Memory only.",
+      "path": "Samples~/BasicCapture"
+    },
+    {
+      "displayName": "Local Journal",
+      "description": "Explicit encrypted journal composition requiring application-supplied key and time providers.",
+      "path": "Samples~/LocalJournal"
+    },
+    {
+      "displayName": "Injected Upload",
+      "description": "Explicit caller-owned service composition; no credentials or automatic startup.",
+      "path": "Samples~/InjectedUpload"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+.DS_Store
+.idea/
+.vs/
+Artifacts/
+Tools/
+ValidationProject/
+NativeHarness/
+Packages/com.company.logos/Tests/
+Packages/com.company.logos/Tests.meta
+Docs/design/
+Docs/decisions/
+Docs/plans/
+!Packages/com.company.logos/Documentation~/
+!Packages/com.company.logos/Documentation~/**
+!Packages/com.company.logos/Samples~/
+!Packages/com.company.logos/Samples~/**
