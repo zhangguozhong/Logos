@@ -92,9 +92,10 @@ namespace Logos
             IsClosed = closed;
         }
     }
-    // 固定元数据，数量和字节各有两个独立分区。持有门锁时不构造记录或文本，也不调用通知回调。
+    // 普通与错误分区各自限制数量和字节。生产者发布槽位；固定消费者移交后才归还槽位。
     internal sealed class BoundedLogQueue : ILogAdmissionController, IWorkerQueuedInput
     {
+        private readonly object consumerGate = new object();
         private readonly object gate = new object();
         private readonly long generation;
         private readonly int recordLimit, messageLimit, stackLimit, batchCount, batchBytes;
@@ -135,6 +136,10 @@ namespace Logos
         }
         public QuotaDayTag SetGate(QuotaAdmissionGate value)
         {
+            var current = Volatile.Read(ref quota);
+            if (current != null && current.Gate.Equals(value))
+                return current.Tag;
+            lock (consumerGate)
             lock (gate)
             {
                 if (quota != null && quota.Gate.Equals(value))
@@ -156,7 +161,7 @@ namespace Logos
         {
             if ((uint)reason >= HealthCounters.ReasonCount || reason == AdmissionReason.Accepted)
                 throw new ArgumentOutOfRangeException(nameof(reason));
-            if (!Monitor.TryEnter(gate))
+            if (!TryEnterRemoval())
                 return QueueDayDropResult.Contended;
             try
             {
@@ -171,9 +176,7 @@ namespace Logos
                         continue;
                     ref Partition p = ref partitions[part];
                     ref Slot slot = ref slots[index];
-                    p.Head = slot.Next;
-                    if (p.Head == -1)
-                        p.Tail = -1;
+                    p.Published.Pop();
                     queuedCount--;
                     queuedByLevel[(int)slot.Record.Level]--;
                     Interlocked.Increment(ref controlDrops[(int)slot.Record.Level * HealthCounters.ReasonCount + (int)reason]);
@@ -185,13 +188,28 @@ namespace Logos
             }
             finally
             {
-                Monitor.Exit(gate);
+                ExitRemoval();
             }
+        }
+        // 清理、快照和门禁变更先取消费锁再取发布锁；旧身份摘要仅尝试反向取锁，失败即追加队尾。
+        private bool TryEnterRemoval()
+        {
+            if (!Monitor.TryEnter(consumerGate))
+                return false;
+            if (Monitor.TryEnter(gate))
+                return true;
+            Monitor.Exit(consumerGate);
+            return false;
+        }
+        private void ExitRemoval()
+        {
+            Monitor.Exit(gate);
+            Monitor.Exit(consumerGate);
         }
         private const int ErrorWeight = 3;
         private enum SlotState : byte
         {
-            Free, Reserved, Queued, Pinned
+            Free, Reserved, Queued
         }
         private struct Slot
         {
@@ -200,14 +218,77 @@ namespace Logos
             public ulong Lease;
             public LogRecord Record;
         }
+        // 两端各自串行。先写入索引再发布写游标；读端归还读游标后槽位才可覆盖。
+        private sealed class IndexRing
+        {
+            private readonly int[] indices;
+            private int read, write;
+
+            public IndexRing(int capacity)
+            {
+                indices = new int[checked(capacity + 1)];
+            }
+
+            public int Capacity => indices.Length - 1;
+            public int Head
+            {
+                get
+                {
+                    int current = read;
+                    return current == Volatile.Read(ref write) ? -1 : indices[current];
+                }
+            }
+
+            public void Push(int index)
+            {
+                int current = write;
+                int next = current + 1 == indices.Length ? 0 : current + 1;
+                if (next == Volatile.Read(ref read))
+                    throw new InvalidOperationException("Queue ring exceeded its slot capacity.");
+                indices[current] = index;
+                Volatile.Write(ref write, next);
+            }
+
+            // 以下两项只在同时持有两侧锁时调用。沿队首最多移动八个索引，
+            // 利用该预留记录自有的空位，保持普通记录和跨身份摘要的既有顺序。
+            public int Peek(int offset)
+            {
+                int count = write >= read ? write - read : indices.Length - read + write;
+                return offset < count ? indices[(int)(((long)read + offset) % indices.Length)] : -1;
+            }
+
+            public void InsertBefore(int offset, int index)
+            {
+                int first = read == 0 ? indices.Length - 1 : read - 1;
+                int dest = first;
+                for (int i = 0; i < offset; i++)
+                {
+                    int src = dest + 1 == indices.Length ? 0 : dest + 1;
+                    indices[dest] = indices[src];
+                    dest = src;
+                }
+                indices[dest] = index;
+                Volatile.Write(ref read, first);
+            }
+
+            public void Pop()
+            {
+                int current = read;
+                Volatile.Write(ref read, current + 1 == indices.Length ? 0 : current + 1);
+            }
+        }
+
         private struct Partition
         {
-            public int Free, Head, Tail, Count, Bytes, PeakCount, PeakBytes;
+            public readonly IndexRing Published, Returned;
+            public int Head => Published.Head;
+            public int Free, Count, Bytes, PeakCount, PeakBytes;
             public readonly int ByteCapacity;
-            public Partition(int start, int bytes)
+            public Partition(int start, int count, int bytes)
             {
                 Free = start;
-                Head = Tail = -1;
+                Published = new IndexRing(count);
+                Returned = new IndexRing(count);
                 Count = Bytes = PeakCount = PeakBytes = 0;
                 ByteCapacity = bytes;
             }
@@ -228,7 +309,7 @@ namespace Logos
             int normalSlots = frozen.NormalQueueCount - (reserveIncident && frozen.EffectiveIncidentInfoContext ? LoggingOptions.IncidentReservedSlots : 0);
             int normalBytes = frozen.NormalQueueBytes - (reserveIncident && frozen.EffectiveIncidentInfoContext ? LoggingOptions.IncidentReservedBytes : 0);
             slots = new Slot[normalSlots + frozen.ErrorQueueCount];
-            partitions = new[] { new Partition(0, normalBytes), new Partition(normalSlots, frozen.ErrorQueueBytes) };
+            partitions = new[] { new Partition(0, normalSlots, normalBytes), new Partition(normalSlots, frozen.ErrorQueueCount, frozen.ErrorQueueBytes) };
             for (int i = 0; i < slots.Length; i++)
             {
                 int partition = i < normalSlots ? 0 : 1;
@@ -240,7 +321,7 @@ namespace Logos
         // 生产者调用快速失败：不自旋、不等待容量或 I/O。冻结的输入是受信任的内部估算值。
         public QueueDecision TryReserve(LogLevel level, int estimatedBytes, out QueueReservation reservation)
             => TryReserve(level, estimatedBytes, out reservation, out _);
-        internal QueueDecision TryReserve(LogLevel level, int estimatedBytes, out QueueReservation reservation, out AdmissionReason quotaReason, bool terminalSummary = false)
+        internal QueueDecision TryReserve(LogLevel level, int estimatedBytes, out QueueReservation reservation, out AdmissionReason quotaReason, bool terminalSummary = false, bool keepGate = false)
         {
             reservation = default;
             quotaReason = AdmissionReason.Accepted;
@@ -266,28 +347,32 @@ namespace Logos
                 }
                 int partition = level >= LogLevel.Error ? 1 : 0;
                 ref Partition p = ref partitions[partition];
-                if (p.Free == -1 || estimatedBytes > p.ByteCapacity - p.Bytes)
+                int index = p.Free >= 0 ? p.Free : p.Returned.Head;
+                if (index < 0 || estimatedBytes > p.ByteCapacity - Volatile.Read(ref p.Bytes))
                     return QueueDecision.Full;
-                int index = p.Free;
                 ref Slot slot = ref slots[index];
-                p.Free = slot.Next;
+                if (p.Free >= 0)
+                    p.Free = slot.Next;
+                else
+                    p.Returned.Pop();
                 slot.State = SlotState.Reserved;
                 slot.Next = -1;
                 slot.Bytes = estimatedBytes;
                 slot.Lease = ++nextLease;
-                p.Count++;
-                p.Bytes += estimatedBytes;
+                int count = Interlocked.Increment(ref p.Count);
+                int bytes = Interlocked.Add(ref p.Bytes, estimatedBytes);
                 reservedCount++;
-                p.PeakCount = Math.Max(p.PeakCount, p.Count);
-                p.PeakBytes = Math.Max(p.PeakBytes, p.Bytes);
+                p.PeakCount = Math.Max(p.PeakCount, count);
+                p.PeakBytes = Math.Max(p.PeakBytes, bytes);
                 reservation = new QueueReservation(this, generation, slot.Lease, index, quota?.Tag);
                 return QueueDecision.Reserved;
             }
             finally
             {
-                Monitor.Exit(gate);
+                if (!keepGate || reservation.Owner == null) Monitor.Exit(gate);
             }
         }
+        internal void EndPriorityPublication() => Monitor.Exit(gate);
         // 任何失败都保留预留。调用者必须在 finally 中取消，包括构造或提交失败时。
         // 提交成功即转移记录所有权；调用者不得修改保留的缓冲区（LogRecord 不可变）。
         public QueueDecision TryCommit(QueueReservation reservation, LogRecord record) => TryCommit(reservation, record, out _);
@@ -320,22 +405,16 @@ namespace Logos
                     return QueueDecision.InvalidInput;
                 ref Partition p = ref partitions[slot.Partition];
                 // 预留按上限收费，成功提交时改为记录实际估算值。差额立即归还分区，槽位仍保留到消费结束。
-                p.Bytes -= slot.Bytes - actualBytes;
+                Interlocked.Add(ref p.Bytes, actualBytes - slot.Bytes);
                 slot.Bytes = actualBytes;
                 slot.Record = record;
                 slot.State = SlotState.Queued;
                 // 只有已提交槽位进入 FIFO。更早的预留仍可继续复制，不阻塞当前队首。
-                if (anchorSlot < 0 || !TryLinkRetiringTail(ref p, reservation.Slot, anchorSlot, anchorSequence))
-                {
-                    if (p.Tail == -1)
-                        p.Head = reservation.Slot;
-                    else
-                        slots[p.Tail].Next = reservation.Slot;
-                    p.Tail = reservation.Slot;
-                }
                 reservedCount--;
-                queuedCount++;
-                queuedByLevel[(int)record.Level]++;
+                Interlocked.Increment(ref queuedCount);
+                Interlocked.Increment(ref queuedByLevel[(int)record.Level]);
+                if (anchorSlot < 0 || !TryLinkRetiringTail(ref p, reservation.Slot, anchorSlot, anchorSequence))
+                    p.Published.Push(reservation.Slot);
                 return QueueDecision.Committed;
             }
             finally
@@ -347,24 +426,28 @@ namespace Logos
         // 每次最多查看八个槽；已借队首、找不到身份边界或可能越过自身首条时，正常追加到队尾。
         private bool TryLinkRetiringTail(ref Partition partition, int index, int anchorSlot, long anchorSequence)
         {
-            if (partition.Head == -1 || pinned >= 0 || quota == null || slots[index].Partition != 0)
+            if (quota == null || slots[index].Partition != 0 || !Monitor.TryEnter(consumerGate))
                 return false;
-            var context = slots[index].Record.Context;
-            int previous = -1, next = partition.Head;
-            bool anchorQueued = slots[anchorSlot].State == SlotState.Queued && slots[anchorSlot].Record.Sequence == anchorSequence;
-            for (int i = 0; i < 8 && next != -1 && ReferenceEquals(slots[next].Record.Context, context); i++)
+            try
             {
-                if (next == anchorSlot) anchorQueued = false;
-                previous = next;
-                next = slots[next].Next;
+                if (pinned >= 0) return false;
+                var ring = partition.Published;
+                var context = slots[index].Record.Context;
+                bool anchorQueued = slots[anchorSlot].State == SlotState.Queued && slots[anchorSlot].Record.Sequence == anchorSequence;
+                int offset = 0;
+                int next = ring.Peek(offset);
+                while (offset < 8 && next >= 0 && ReferenceEquals(slots[next].Record.Context, context))
+                {
+                    if (next == anchorSlot) anchorQueued = false;
+                    next = ring.Peek(++offset);
+                }
+                if (anchorQueued || next < 0 || slots[next].Record.Context.IdentityContextVersion <= context.IdentityContextVersion
+                    || (offset == 0 && !ReferenceEquals(lastNormalTransfer, context)))
+                    return false;
+                ring.InsertBefore(offset, index);
+                return true;
             }
-            if (anchorQueued || next == -1 || slots[next].Record.Context.IdentityContextVersion <= context.IdentityContextVersion
-                || (previous == -1 && !ReferenceEquals(lastNormalTransfer, context)))
-                return false;
-            slots[index].Next = next;
-            if (previous == -1) partition.Head = index;
-            else slots[previous].Next = index;
-            return true;
+            finally { Monitor.Exit(consumerGate); }
         }
 
         // 可靠回滚有意使用短时阻塞的元数据锁，并不保证绝对无等待。
@@ -400,13 +483,18 @@ namespace Logos
             decision = QueueTakeDecision.InvalidInput;
             if (destination == null || destination.Length == 0)
                 return false;
-            if (!Monitor.TryEnter(gate))
+            if (!TryEnterRemoval())
             {
                 decision = QueueTakeDecision.ContentionRejected;
                 return false;
             }
             try
             {
+                if (pinned != -1)
+                {
+                    decision = QueueTakeDecision.ContentionRejected;
+                    return false;
+                }
                 int limit = Math.Min(batchCount, destination.Length);
                 while (count < limit)
                 {
@@ -421,9 +509,7 @@ namespace Logos
                     }
                     ref Partition p = ref partitions[partition];
                     ref Slot slot = ref slots[index];
-                    p.Head = slot.Next;
-                    if (p.Head == -1)
-                        p.Tail = -1;
+                    p.Published.Pop();
                     destination[count++] = slot.Record;
                     bytes += slot.Bytes;
                     queuedCount--;
@@ -436,7 +522,7 @@ namespace Logos
             }
             finally
             {
-                Monitor.Exit(gate);
+                ExitRemoval();
             }
         }
         internal readonly struct HeadLease
@@ -461,7 +547,7 @@ namespace Logos
         {
             lease = default;
             decision = QueueTakeDecision.Empty;
-            if (!Monitor.TryEnter(gate))
+            if (!Monitor.TryEnter(consumerGate))
             {
                 decision = QueueTakeDecision.ContentionRejected;
                 return false;
@@ -470,65 +556,55 @@ namespace Logos
             {
                 if (pinned != -1)
                     return false;
-                bool normal = (classes & LogClassMask.Normal) != 0 && partitions[0].Head != -1;
-                // 仅暂缓跨登录版本的普通队首。保持原顺序，错误分区和同身份摘要仍可移交。
-                if (normal && holdNewNormal && lastNormalTransfer != null)
+                int error = partitions[1].Head;
+                int normal = partitions[0].Head;
+                if (normal >= 0 && holdNewNormal && lastNormalTransfer != null)
                 {
                     ref Partition pending = ref partitions[0];
-                    if (pending.Free != -1 && pending.ByteCapacity - pending.Bytes >= recordLimit
-                        && slots[pending.Head].Record.Context.IdentityContextVersion > lastNormalTransfer.IdentityContextVersion)
-                        normal = false;
+                    if (Volatile.Read(ref pending.Count) < pending.Published.Capacity
+                        && pending.ByteCapacity - Volatile.Read(ref pending.Bytes) >= recordLimit
+                        && slots[normal].Record.Context.IdentityContextVersion > lastNormalTransfer.IdentityContextVersion)
+                        normal = -1;
                 }
-                bool error = (classes & LogClassMask.ErrorFatal) != 0 && partitions[1].Head != -1;
-                if (!normal && !error)
+                if ((classes & LogClassMask.Normal) == 0)
+                    normal = -1;
+                if ((classes & LogClassMask.ErrorFatal) == 0)
+                    error = -1;
+                int index = error >= 0 && (normal < 0 || errorStreak < ErrorWeight) ? error : normal;
+                if (index < 0)
                     return false;
-                int part = error && (!normal || errorStreak < ErrorWeight) ? 1 : 0;
-                ref Partition p = ref partitions[part];
-                int index = p.Head;
+                // 借出的索引留在环首，生产者可以同时追加队尾；回滚无需重新插入记录。
                 ref Slot slot = ref slots[index];
-                p.Head = slot.Next;
-                if (p.Head == -1)
-                    p.Tail = -1;
-                slot.Next = -1;
-                slot.State = SlotState.Pinned;
                 pinned = index;
-                queuedCount--;
-                queuedByLevel[(int)slot.Record.Level]--;
                 lease = new HeadLease(this, index, slot.Lease, slot.Record);
                 decision = QueueTakeDecision.Taken;
                 return true;
             }
             finally
             {
-                Monitor.Exit(gate);
+                Monitor.Exit(consumerGate);
             }
         }
         internal bool ResolvePin(HeadLease lease, bool remove, bool transferred = false)
         {
-            lock (gate)
+            lock (consumerGate)
             {
-                if (!ReferenceEquals(lease.Owner, this) || pinned == -1 || pinned != lease.Index || slots[pinned].Lease != lease.Lease)
+                if (!ReferenceEquals(lease.Owner, this) || pinned < 0 || pinned != lease.Index || slots[pinned].Lease != lease.Lease)
                     return false;
-                int index = pinned;
-                pinned = -1;
-                ref Slot slot = ref slots[index];
                 if (remove)
                 {
+                    ref Slot slot = ref slots[pinned];
+                    ref Partition part = ref partitions[slot.Partition];
                     if (slot.Partition == 0 && transferred) lastNormalTransfer = slot.Record.Context;
+                    part.Published.Pop();
+                    Interlocked.Decrement(ref queuedCount);
+                    Interlocked.Decrement(ref queuedByLevel[(int)slot.Record.Level]);
                     errorStreak = slot.Partition == 1 ? Math.Min(ErrorWeight, errorStreak + 1) : 0;
-                    ReleaseSlot(index);
+                    ResetSlot(ref part, ref slot);
+                    part.Returned.Push(pinned);
                 }
-                else
-                {
-                    ref Partition p = ref partitions[slot.Partition];
-                    slot.State = SlotState.Queued;
-                    slot.Next = p.Head;
-                    p.Head = index;
-                    if (p.Tail == -1)
-                        p.Tail = index;
-                    queuedCount++;
-                    queuedByLevel[(int)slot.Record.Level]++;
-                }
+                // 回滚只解除借用；该记录始终位于分区头部。
+                pinned = -1;
                 return true;
             }
         }
@@ -536,13 +612,17 @@ namespace Logos
         {
             ref Slot slot = ref slots[index];
             ref Partition p = ref partitions[slot.Partition];
-            p.Count--;
-            p.Bytes -= slot.Bytes;
-            slot.Record = null;
-            slot.State = SlotState.Free;
-            slot.Bytes = 0;
+            ResetSlot(ref p, ref slot);
             slot.Next = p.Free;
             p.Free = index;
+        }
+        private static void ResetSlot(ref Partition part, ref Slot slot)
+        {
+            Interlocked.Decrement(ref part.Count);
+            Interlocked.Add(ref part.Bytes, -slot.Bytes);
+            slot.Bytes = 0;
+            slot.Record = null;
+            slot.State = SlotState.Free;
         }
         // Close 与提交在同一元数据门锁下线性化，并保留未归还租约以便安全取消。
         // 已提交的记录仍可排空。T4 的发信号和等待操作必须放在该门锁之外。
@@ -554,10 +634,14 @@ namespace Logos
         // 观察接口不是快速失败的生产者 API；应在延迟敏感回调之外使用。
         public QueueSnapshot Snapshot()
         {
+            lock (consumerGate)
             lock (gate)
             {
+                var levels = (int[])queuedByLevel.Clone();
+                if (pinned >= 0)
+                    levels[(int)slots[pinned].Record.Level]--;
                 return new QueueSnapshot(partitions[0].Count, partitions[1].Count, partitions[0].Bytes, partitions[1].Bytes,
-                    reservedCount, queuedCount, partitions[0].PeakCount, partitions[1].PeakCount, partitions[0].PeakBytes, partitions[1].PeakBytes, closed, (int[])queuedByLevel.Clone());
+                    reservedCount, queuedCount - (pinned >= 0 ? 1 : 0), partitions[0].PeakCount, partitions[1].PeakCount, partitions[0].PeakBytes, partitions[1].PeakBytes, closed, levels);
             }
         }
     }

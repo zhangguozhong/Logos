@@ -209,7 +209,7 @@ namespace Logos
             // 无效等级和 Off 使用固定诊断桶（Trace），不创建动态维度。
             LogLevel bucket = level >= LogLevel.Trace && level <= LogLevel.Fatal ? level : LogLevel.Trace;
             counters.Add(HealthMetric.Attempted, bucket);
-            bool entered = false, reserved = false, coalesced = false;
+            bool entered = false, reserved = false, coalesced = false, gateHeld = false;
             RepeatSlot repeatSlot = null;
             DiagnosticControlState controlView = null;
             QuotaDayTag? quotaTag = null;
@@ -308,10 +308,15 @@ namespace Logos
                     return result = new AdmissionResult(rate == RateLimitDecision.RateLimited ? AdmissionReason.RateLimited : AdmissionReason.InvalidInput);
                 }
                 // 先占用保守估算的队列容量，再复制和构造记录。提交前的任何退出都要归还预留；已经使用的速率额度保持扣除。
-                QueueDecision reserve = queue.TryReserve(level, memoryBytes, out token, out var quotaReason, terminal);
+                // 仅短 Warn 的内置时钟路径在一次临界区内完成预留和提交。无截断复制、用户时钟或通知回调。
+                bool shortWarn = level == LogLevel.Warn && clock is StopwatchClock && diagnosticMetadata == null
+                    && summary == null && (message?.Length ?? 0) <= options.MaxMessageChars
+                    && (stack?.Length ?? 0) <= options.MaxStackChars;
+                QueueDecision reserve = queue.TryReserve(level, memoryBytes, out token, out var quotaReason, terminal, shortWarn);
                 if (reserve != QueueDecision.Reserved)
                     return result = MapQueue(reserve, AdmissionStage.Reservation, quotaReason);
                 reserved = true;
+                gateHeld = shortWarn;
                 if (recovered != 0 && !Nullable.Equals(token.QuotaDayTag, quotaTag))
                     return result = new AdmissionResult(AdmissionReason.StaleQuotaDay);
                 if (summary != null)
@@ -337,6 +342,11 @@ namespace Logos
                 if (commit != QueueDecision.Committed)
                     return result = MapQueue(commit, AdmissionStage.QueueCommit, quotaReason);
                 reserved = false;
+                if (gateHeld)
+                {
+                    queue.EndPriorityPublication();
+                    gateHeld = false;
+                }
                 if (incidentInfo != null && summary == null && level >= LogLevel.Error
                     && incidentObservation > 0 && Nullable.Equals(quotaTag, token.QuotaDayTag)
                     && incidentInfo.TryTrigger(controlView, token.QuotaDayTag, incidentObservation, timestamp, number))
@@ -366,6 +376,16 @@ namespace Logos
             }
             finally
             {
+                try
+                {
+                    if (reserved)
+                        queue.CancelReservation(token);
+                }
+                finally
+                {
+                    if (gateHeld)
+                        queue.EndPriorityPublication();
+                }
                 if (!options.ConsecutiveUnityInfo && result.Reason == AdmissionReason.ContentionRejected)
                 {
                     // 普通准入失败后仅再探测一圈。可以借用已提交的同域首条，
@@ -395,8 +415,6 @@ namespace Logos
                     if (hasTail && !ReferenceEquals(controlView, Volatile.Read(ref diagnosticControl)))
                         worker.NotifyLateIdentityTail();
                 }
-                if (reserved)
-                    queue.CancelReservation(token);
                 if (coalesced)
                     Interlocked.Increment(ref coalescedUnityInfo);
                 else if (!result.IsAccepted)

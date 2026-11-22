@@ -18,6 +18,6 @@ https://github.com/zhangguozhong/Logos.git?path=/Packages/com.company.logos
 
 ## 性能与适用范围
 
-本机 Unity 编辑器的三档五对测试中，默认实现的后台线程 CPU 波动在 100、1,000、10,000 条/s 三档均超过 15% 门槛。Android/iOS 真机帧耗时、持续能耗及宿主卸载仍待验证。[最新压测结果](Docs/benchmarks/unity-mixed-load.md)
+本机 Unity 编辑器的三档五对测试中，默认实现的后台线程 CPU 波动在 100 条/s 时超过 15% 门槛，1,000 和 10,000 条/s 两档在本轮达标。Android/iOS 真机帧耗时、持续能耗及宿主卸载仍待验证。[最新压测结果](Docs/benchmarks/unity-mixed-load.md)
 
 [文档导航](Docs/README.md) · [验收标准](Docs/acceptance.md)
