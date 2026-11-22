@@ -29,6 +29,8 @@ dotnet ./Artifacts/logos-cli-bin/logos-cli.dll --help
 
 ## 导出密钥
 
+Unity 端的注入示例、两端可对照的配置和轮换后的解码命令见[导出密钥对齐与轮换](../Packages/com.company.logos/Documentation~/transport.md#export-key-alignment)。
+
 ```json
 {
   "exportKeys": [

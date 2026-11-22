@@ -42,3 +42,88 @@ bool installed = LogosSdk.TryInitialize(loggingSettings, storageSettings, storag
 撤权和交付路径有明确的先后顺序。撤权成功返回后，旧授权尚未交付的路径不会再传给业务。若 `TryStart` 已进入，业务会收到取消请求；在操作确认实际关闭之前，文件仍由该操作借用。`TryStart` 只安排一次异步发送并立即返回，禁止同步等待 Unity 主线程、网络响应或文件读取。否则同时发生的撤权或停止可能被业务回调阻塞。
 
 异常退出后，无论下次注入正文服务还是文件适配器，Logos 都会在取得日志目录所有权后清理已有工作区，无需用户重新授权。磁盘额度按剩余文件计费。工作区内的未知文件会保留，并阻止新的文件导出；同目录下可确认归属的普通暂存文件仍会清理。业务应将自己的文件放在独立目录。
+
+<a id="export-key-alignment"></a>
+
+## 从 Unity 的 TransferKeys 到离线解密
+
+Unity 创建回捞批次时，从 `TransferKeys.TryAcquireCurrent()` 取得导出密钥，并把密钥 ID 写入批次。排障人员在受控环境中单独取得对应的密钥配置。解码时，logos-cli 按文件中的 ID 精确查找配置，再用对应的 AES 密钥解密、用 MAC 密钥校验。两端须对齐三个值：区分大小写的 ID、32 字节加密密钥、32 字节独立认证密钥。CLI 配置中的 Base64 表示这两组原始字节。本地留存使用的 `storageKeys` 可独立管理，解码回捞批次只需提供导出密钥。
+
+### 1. 在 Unity 注入导出密钥
+
+下面两组公开测试值仅用于本地演示。生产环境由业务的密钥管理渠道向两端分别提供对应版本的材料，请勿将生产密钥写入源码、公开仓库或日志。
+
+```csharp
+using System;
+using Logos.Storage;
+
+sealed class DemoTransferKeys : IStorageKeyProvider
+{
+    private readonly string currentId;
+
+    public DemoTransferKeys(string currentId)
+    {
+        this.currentId = currentId;
+    }
+
+    public KeyAcquireResult TryAcquireCurrent() => TryAcquire(currentId);
+
+    public KeyAcquireResult TryAcquire(string keyId)
+    {
+        switch (keyId)
+        {
+            case "acceptance-key":
+                return Acquire(keyId, "BwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+            case "acceptance-key-v2":
+                return Acquire(keyId, "CwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", "DQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+            default:
+                return KeyAcquireResult.Unavailable();
+        }
+    }
+
+    private static KeyAcquireResult Acquire(string id, string aes, string mac)
+    {
+        return KeyAcquireResult.Acquired(new KeyMaterial(id,
+            Convert.FromBase64String(aes), Convert.FromBase64String(mac)));
+    }
+}
+```
+
+在本页开头的初始化示例前定义 `var transferKeys = new DemoTransferKeys("acceptance-key");`，再将它赋给 `LogosUploadOptions.TransferKeys` 并调用 `LogosSdk.TryInitialize`。初始化成功后，按本页授权与回捞步骤提交请求。让业务接收端完整保存一个已交付批次，命名为 `retrieval-v1.batch`。正文模式保存请求的原始正文字节，文件模式保存上传器收到的文件内容。设备上的 `.logos` 日文件不能作为此命令的输入。
+
+### 2. 配置 logos-cli 并解码
+
+在受控的排障目录创建 `export-keys.json`。下面同时配置当前版本和下一版本，以便演示轮换。仅使用第一版时，只需保留第一项。
+
+```json
+{
+  "exportKeys": [
+    {
+      "id": "acceptance-key",
+      "encryptionKeyBase64": "BwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "macKeyBase64": "CQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    },
+    {
+      "id": "acceptance-key-v2",
+      "encryptionKeyBase64": "CwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "macKeyBase64": "DQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    }
+  ]
+}
+```
+
+在解压后的 CLI 目录执行以下命令，示例假定配置和批次也在该目录。成功时退出码为 0，`timeline.jsonl` 每行一条已验证的记录。
+
+```sh
+dotnet logos-cli.dll decode --keys export-keys.json --format jsonl retrieval-v1.batch > timeline.jsonl
+```
+
+### 3. 轮换后读取旧批次
+
+先在解码端加入新 ID 和新材料，保留旧条目。随后在 Unity 下次初始化时，将提供器改为 `new DemoTransferKeys("acceptance-key-v2")`。新创建的批次使用新 ID，已导出的旧批次继续引用原 ID。避免在同一 ID 下覆盖密钥。将新批次保存为 `retrieval-v2.batch` 后，可用同一份配置读取两代批次：
+
+```sh
+dotnet logos-cli.dll decode --keys export-keys.json --format jsonl retrieval-v1.batch retrieval-v2.batch > combined.jsonl
+```
+
+旧批次仍需回读或仍有旧批次待交付时，保留对应版本的密钥。找不到批次指定的 ID 时，CLI 返回 3；ID 存在但材料错误导致认证失败时返回 5。两种情况下整次命令均不输出日志记录。修正配置后可对同一批次重试，无需重新回捞。
