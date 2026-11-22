@@ -113,7 +113,7 @@ namespace Logos
         {
             if (!OnMainThread || !pipeline.Start())
                 return false;
-            if (UnityLogger.Bind(pipeline))
+            if (LogosLog.Bind(pipeline))
                 return true;
             RequestDetach(TimeSpan.Zero, true);
             return false;
@@ -235,7 +235,7 @@ namespace Logos
                 return false;
             pipeline.RequestStop(dropPending ? WorkerStopMode.DropPending : WorkerStopMode.DrainUntilDeadline, budget);
             detachRequested = true;
-            UnityLogger.UnbindIfMatches(pipeline);
+            LogosLog.UnbindIfMatches(pipeline);
             Poll();
             return true;
         }

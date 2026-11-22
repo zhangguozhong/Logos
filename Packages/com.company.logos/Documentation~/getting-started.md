@@ -23,4 +23,4 @@ bool initialized = LogosSdk.TryInitialize(settings, processor, out var owner, ou
 
 ## 业务事件与用户切换
 
-仅显式调用 Logos 的日志进入 SDK。已有 `Debug.Log`、`Debug.LogWarning`、`Debug.LogError` 或 `Debug.LogException` 调用需要业务按需迁移。已有异常堆栈可传给 `UnityLogger.Exception`。关键节点可调用 `UnityLogger.KeyInfo(message, eventTypeId)`，使用稳定事件类型。Unity 启动时采集一次设备快照。登录、切号和登出由业务在主线程调用 `LogosSession.UpdateUser(generation, expectedIdentityVersion, diagnosticUserId, out identityVersion)`，使用后台映射的诊断标识，登出传 null。版本冲突时先核对当前会话，避免迟到的登录回调覆盖新用户。跨切号完成的异步操作可在开始时 `CaptureContext()`，再用会话的 `TryLog(handle, ...)` 写入。[生命周期](Lifecycle.md) · [按 UID 回捞](transport.md)
+仅显式调用 Logos 的日志进入 SDK。已有 `Debug.Log`、`Debug.LogWarning`、`Debug.LogError` 或 `Debug.LogException` 调用需要业务按需迁移。已有异常堆栈可传给 `LogosLog.Exception`。关键节点可调用 `LogosLog.KeyInfo(message, eventTypeId)`，使用稳定事件类型。Unity 启动时采集一次设备快照。登录、切号和登出由业务在主线程调用 `LogosSession.UpdateUser(generation, expectedIdentityVersion, diagnosticUserId, out identityVersion)`，使用后台映射的诊断标识，登出传 null。版本冲突时先核对当前会话，避免迟到的登录回调覆盖新用户。跨切号完成的异步操作可在开始时 `CaptureContext()`，再用会话的 `TryLog(handle, ...)` 写入。[生命周期](Lifecycle.md) · [按 UID 回捞](transport.md)

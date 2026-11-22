@@ -1,17 +1,17 @@
 # 日志等级与线上采集
 
-默认最低等级为 Info。通过 `UnityLogger` 或会话的 `TryLog` 显式记录业务日志，各等级均受额度限制。
+默认最低等级为 Info。通过 `LogosLog` 或会话的 `TryLog` 显式记录业务日志，各等级均受额度限制。
 
 | 等级 | 使用方式 |
 |---|---|
 | Trace、Debug | 临时诊断，需启用相应等级 |
 | Info | 一般业务节点用 `Info`，还原现场所需的关键节点用 `KeyInfo` |
 | Warn | 可恢复异常、降级或重试 |
-| Error | 明确失败，有异常堆栈时可调用 `UnityLogger.Exception` |
+| Error | 明确失败，有异常堆栈时可调用 `LogosLog.Exception` |
 | Fatal | 业务判定为致命的故障 |
 | Off | 关闭采集 |
 
-例如 `UnityLogger.KeyInfo("支付已提交", "payment.submitted")`。事件类型应稳定且非空。关键 Info 在普通预算内享有有限预留；普通 `Info` 即使带事件 ID 仍使用普通额度。Error/Fatal 共用独立的有限预留。高成本消息可先用 `IsEnabled` 判断等级是否启用；实际准入以写入调用的返回值为准。
+例如 `LogosLog.KeyInfo("支付已提交", "payment.submitted")`。事件类型应稳定且非空。关键 Info 在普通预算内享有有限预留；普通 `Info` 即使带事件 ID 仍使用普通额度。Error/Fatal 共用独立的有限预留。高成本消息可先用 `IsEnabled` 判断等级是否启用；实际准入以写入调用的返回值为准。
 
 ## 如何判断丢在了哪里
 

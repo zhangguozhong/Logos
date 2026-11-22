@@ -2,7 +2,7 @@ using System;
 using System.Threading;
 namespace Logos
 {
-    public static class UnityLogger
+    public static class LogosLog
     {
         private static LoggingPipeline bound;
         /// <summary>仅在显式请求时分配自有观察快照；日志调用不分配该快照。</summary>

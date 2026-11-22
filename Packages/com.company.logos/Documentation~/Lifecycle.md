@@ -7,7 +7,7 @@
 | 调用位置 | 接口与约束 |
 |---|---|
 | Unity 主线程 | 读取配置资产，调用 `LogosSdk.TryInitialize`、`TryAttach`、身份与上下文更新、前后台通知，以及停止和轮询。原生宿主收到的通知应派发到 Unity 主线程。 |
-| 任意产生日志的线程 | 调用 `UnityLogger` 或 `LogosSession.TryLog`。业务格式化消息和获取堆栈的成本由调用线程承担。 |
+| 任意产生日志的线程 | 调用 `LogosLog` 或 `LogosSession.TryLog`。业务格式化消息和获取堆栈的成本由调用线程承担。 |
 | SDK 后台线程 | 自定义 `ILogBatchProcessor` 同步借用批次，仅在本次调用内访问记录，按确定完成的前缀返回。处理器应检查取消和截止时间，避免调用 Unity API 或使用 `Debug.Log` 记录自己的处理过程。 |
 
 ## 初始化与重复接入

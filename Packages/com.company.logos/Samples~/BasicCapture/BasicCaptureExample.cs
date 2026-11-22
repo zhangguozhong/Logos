@@ -30,12 +30,12 @@ namespace Logos.Samples.BasicCapture
             if (!StartupSucceeded)
                 return;
 
-            UnityLogger.Trace("Sample trace", "sample.trace"); // 默认策略过滤 Trace/Debug。
-            UnityLogger.Debug("Sample debug", "sample.debug");
-            UnityLogger.Info("Sample info", "sample.info");
-            UnityLogger.Warn("Sample warning", "sample.warn");
-            UnityLogger.Error("Sample error", "sample.error");
-            UnityLogger.Fatal("Sample fatal", "sample.fatal");
+            LogosLog.Trace("Sample trace", "sample.trace"); // 默认策略过滤 Trace/Debug。
+            LogosLog.Debug("Sample debug", "sample.debug");
+            LogosLog.Info("Sample info", "sample.info");
+            LogosLog.Warn("Sample warning", "sample.warn");
+            LogosLog.Error("Sample error", "sample.error");
+            LogosLog.Fatal("Sample fatal", "sample.fatal");
         }
 
         // 登录流程开始时保存身份版本，业务确认登录后才发布；登出时传 null。

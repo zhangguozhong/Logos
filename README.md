@@ -13,7 +13,7 @@ https://github.com/zhangguozhong/Logos.git?path=/Packages/com.company.logos
 ## 接入顺序
 
 1. 在 Unity 主线程初始化并保留返回的会话。线上留存模式还需提供密钥，并等待存储就绪。[初始化](Packages/com.company.logos/Documentation~/getting-started.md) · [本地留存](Packages/com.company.logos/Documentation~/local-journal.md)
-2. 使用 `UnityLogger` 记录业务日志，Unity 自带的 `Debug.Log` 系列不会落盘。在关键业务节点使用 `KeyInfo`，登录、切号和登出时更新诊断 UID。[分级与丢弃](Packages/com.company.logos/Documentation~/log-levels.md) · [登录、切号与安全卸载](Packages/com.company.logos/Documentation~/Lifecycle.md)
+2. 使用 `LogosLog` 记录业务日志，Unity 自带的 `Debug.Log` 系列不会落盘。在关键业务节点使用 `KeyInfo`，登录、切号和登出时更新诊断 UID。[分级与丢弃](Packages/com.company.logos/Documentation~/log-levels.md) · [登录、切号与安全卸载](Packages/com.company.logos/Documentation~/Lifecycle.md)
 3. 需要回捞时注入上传服务并提供当前授权。宿主卸载前在主线程轮询停止入口，直到会话允许卸载。[上传与回捞](Packages/com.company.logos/Documentation~/transport.md)
 
 ## 性能与适用范围
