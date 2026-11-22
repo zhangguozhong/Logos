@@ -89,6 +89,18 @@ namespace Logos.Transport
         {
             if (immutableBody == null || keys == null || request == null || access == null)
                 throw new ArgumentNullException();
+            return DecodeCore(immutableBody, keys, request, access, revision, generation, utc, out _);
+        }
+
+        // 离线读取已经导出的密文，仅返回通过批次认证的安装标识和记录。
+        // 在线接收必须走 Decode，核对独立提供的请求、授权与清理代次。
+        internal static VerifiedUploadEnvelope ReadArchive(UploadBody body, IStorageKeyProvider keys, out string installation)
+            => DecodeCore(body, keys, null, null, 0, 0, default, out installation);
+
+        private static VerifiedUploadEnvelope DecodeCore(UploadBody immutableBody, IStorageKeyProvider keys, RetrievalRequest request,
+            TransferAccessController access, long revision, long generation, DateTime utc, out string installation)
+        {
+            installation = null;
             if (immutableBody.Length < 1888 || immutableBody.Length > MaximumBodyBytes)
                 throw new StorageFormatException();
             byte[] body = immutableBody.CopyBytes();
@@ -113,8 +125,13 @@ namespace Logos.Transport
                         Wire.Clear(mac);
                     }
                     // 旧格式没有绑定查询范围的摘要，因而无法证明这批数据是针对当前诊断用户筛选的。
-                    if (version == 1 && request.Scope.DiagnosticUserId != null)
+                    if (version == 1 && request?.Scope.DiagnosticUserId != null)
                         throw new UnauthorizedAccessException("UID retrieval requires an authenticated scope digest.");
+                    if (request == null)
+                    {
+                        generation = Wire.I64(body, 24);
+                        revision = Wire.I64(body, 32);
+                    }
                     if (!Wire.Equal(Wire.Slice(body, 0, 8), Magic) || Wire.U16(body, 10) != 1024 || Wire.U32(body, 12) != body.Length || Wire.U32(body, 16) != body.Length - 1056 || Wire.U16(body, 20) < 1 || Wire.U16(body, 20) > 256 || Wire.U16(body, 22) > 1 || Wire.I64(body, 24) != generation || Wire.I64(body, 32) != revision || revision < 0 || generation < 0)
                         throw new StorageFormatException();
                     Zero(body, 60, 4);
@@ -125,7 +142,12 @@ namespace Logos.Transport
                         Zero(body, 800, 224);
                     long day = Wire.I64(body, 40), offset = Wire.I64(body, 48), end = Wire.I64(body, 88);
                     int before = Wire.U16(body, 56), next = Wire.U16(body, 58);
-                    if (day < request.FirstQuotaDay || day >= request.FirstQuotaDay + request.QuotaDays || offset < 512 || end <= offset || before > 255 || next <= before || next > 256 || Wire.U16(body, 20) > next - before || ReadId(body, 96) != request.TaskId || ReadId(body, 225) != request.DestinationId || ReadId(body, 354) != request.InstallationId)
+                    string task = ReadId(body, 96), destination = ReadId(body, 225);
+                    installation = ReadId(body, 354);
+                    if (day < 0 || offset < 512 || end <= offset || before > 255 || next <= before || next > 256 || Wire.U16(body, 20) > next - before)
+                        throw new StorageFormatException();
+                    if (request != null && (day < request.FirstQuotaDay || day >= request.FirstQuotaDay + request.QuotaDays
+                        || task != request.TaskId || destination != request.DestinationId || installation != request.InstallationId))
                         throw new StorageFormatException();
                     var h = FileHeaderCodec.Verify(Wire.Slice(body, 1024, 512), key);
                     if (h.DayId != day || h.MaxDailyFileBytes != 262144 || h.ErrorFatalReservedBytesPerDay != 131072 || h.PolicyVersion != 1)
@@ -137,7 +159,7 @@ namespace Logos.Transport
                         if (decoded.Records.Length != Wire.U16(body, 20) || decoded.IsErrorClass != (Wire.U16(body, 22) == 1))
                             throw new StorageFormatException();
                         foreach (var record in decoded.Records)
-                            if (!access.Matches(request, revision, generation, utc, record))
+                            if (request != null && !access.Matches(request, revision, generation, utc, record))
                                 throw new UnauthorizedAccessException("Record outside current request/authorization intersection.");
                         BatchCoverageManifest coverage = null;
                         if (version == 2)
@@ -146,7 +168,10 @@ namespace Logos.Transport
                             var accumulator = new CoverageAccumulator();
                             foreach (var record in decoded.Records)
                                 accumulator.Observe(record);
-                            coverage = accumulator.Finish(request.Scope);
+                            // 离线文件只携带已认证的范围摘要，无法由摘要反推出原请求。
+                            coverage = request == null
+                                ? new BatchCoverageManifest(accumulator, Wire.Slice(body, BatchCoverageManifest.Offset + 80, 32))
+                                : accumulator.Finish(request.Scope);
                             coverage.ValidateBytes(body);
                         }
                         return new VerifiedUploadEnvelope(decoded.Records, new ExportBookmark(day, end, Wire.Slice(body, 512, 32), offset, next, generation), before, Wire.U64(body, 64), Wire.Slice(body, 72, 16), coverage);

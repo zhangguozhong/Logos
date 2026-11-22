@@ -7,3 +7,4 @@
 | 实现自己的接收服务 | [HTTP 适配器](../Packages/com.company.logos/Documentation~/Http-README.md) · [自定义上传服务](../Packages/com.company.logos/Documentation~/transport.md) |
 | 确认上线前要测什么 | [验收标准](acceptance.md) |
 | 查看三档实测和已知性能限制 | [最新压测报告](benchmarks/unity-mixed-load.md) |
+| 解密回捞批次、合并时间线、导出 JSONL | [logos-cli 使用说明](../cli/README.md) |

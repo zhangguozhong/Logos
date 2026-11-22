@@ -21,3 +21,7 @@ https://github.com/zhangguozhong/Logos.git?path=/Packages/com.company.logos
 本机 Unity 编辑器的三档五对测试中，默认实现的后台线程 CPU 波动在 100 条/s 时超过 15% 门槛，1,000 和 10,000 条/s 两档在本轮达标。Android/iOS 真机帧耗时、持续能耗及宿主卸载仍待验证。[最新压测结果](Docs/benchmarks/unity-mixed-load.md)
 
 [文档导航](Docs/README.md) · [验收标准](Docs/acceptance.md)
+
+## 离线读取回捞日志
+
+排障人员可单独下载 logos-cli，用导出密钥将一个或多个回捞批次合并为文本或 JSONL 时间线。Unity 应用继续通过上方的 UPM 地址安装 SDK。[中文使用说明](cli/README.md) · [下载 logos-cli](https://github.com/zhangguozhong/Logos/releases/tag/logos-cli-v0.1.0)

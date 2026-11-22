@@ -74,7 +74,8 @@ namespace Logos.Transport
         public string AppVersion => null;
         public string UnityVersion => null;
         public byte[] CopyScopeDigest() => (byte[])scopeDigest.Clone();
-        internal BatchCoverageManifest(CoverageAccumulator a, RetrievalScope scope)
+        internal BatchCoverageManifest(CoverageAccumulator a, RetrievalScope scope) : this(a, DigestScope(scope)) { }
+        internal BatchCoverageManifest(CoverageAccumulator a, byte[] authenticatedDigest)
         {
             PhysicalRecords = a.Physical;
             DirectRecords = a.Direct;
@@ -89,7 +90,7 @@ namespace Logos.Transport
             LastSelectedUtc = a.Last;
             FirstRepresentedUtc = a.MemberFirst;
             LastRepresentedUtc = a.MemberLast;
-            scopeDigest = DigestScope(scope);
+            scopeDigest = authenticatedDigest;
         }
         internal void Write(byte[] b, int o)
         {
