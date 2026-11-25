@@ -5,10 +5,11 @@
     <AssemblyName>logos-cli</AssemblyName>
     <Version>0.1.0</Version>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UseAppHost>false</UseAppHost>
+    <UseAppHost Condition="'$(SelfContained)' != 'true'">false</UseAppHost>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="LogosDecoder" />
     <Compile Include="*.cs" />
     <ProjectReference Include="Sdk/LogosSdk.csproj" />
   </ItemGroup>

@@ -16,7 +16,7 @@ internal static class Program
         Encoder = JavaScriptEncoder.Create(UnicodeRanges.All)
     };
 
-    private static int Main(string[] args)
+    internal static int Main(string[] args)
     {
         if (args is ["--help"] or ["-h"] or ["decode", "--help"])
         {

@@ -25,3 +25,5 @@ https://github.com/zhangguozhong/Logos.git?path=/Packages/com.company.logos
 ## 离线读取回捞日志
 
 排障人员可单独下载 logos-cli，用导出密钥将一个或多个回捞批次合并为文本或 JSONL 时间线。Unity 应用继续通过上方的 UPM 地址安装 SDK。[中文使用说明](cli/README.md) · [下载 logos-cli](https://github.com/zhangguozhong/Logos/releases/tag/logos-cli-v0.1.0)
+
+桌面版支持拖入批次、解密导出、定位首个异常和按 UID、日期或关键词筛选。图形工具独立于 Unity 包。[GUI 使用说明](gui/README.md) · [下载桌面版](https://github.com/zhangguozhong/Logos/releases/tag/logos-decoder-v0.1.0)

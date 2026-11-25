@@ -1,0 +1,106 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ x:Class="Logos.Decoder.TimelineWindow" Title="日志时间线" Icon="/Assets/Logos.png" Width="950" Height="700" MinWidth="720" MinHeight="530" WindowStartupLocation="CenterOwner">
+  <Window.Styles>
+    <Style Selector="Button">
+      <Setter Property="CornerRadius" Value="6"/>
+      <Setter Property="Padding" Value="12,5"/>
+    </Style>
+    <Style Selector="TextBox.filter">
+      <Setter Property="CornerRadius" Value="7"/>
+      <Setter Property="MinHeight" Value="36"/>
+      <Setter Property="Padding" Value="10,0"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+    </Style>
+    <Style Selector="Button.choice">
+      <Setter Property="Width" Value="32"/>
+      <Setter Property="Height" Value="28"/>
+      <Setter Property="Padding" Value="0"/>
+      <Setter Property="Margin" Value="0,0,3,0"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+    </Style>
+    <Style Selector="Button.navigation">
+      <Setter Property="Height" Value="36"/>
+      <Setter Property="Padding" Value="14,0"/>
+      <Setter Property="CornerRadius" Value="7"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="Foreground" Value="#25496C"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="BorderBrush" Value="#ADBDCE"/>
+    </Style>
+    <Style Selector="Button.navigation:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#F5F7FA"/>
+      <Setter Property="Foreground" Value="#647587"/>
+      <Setter Property="BorderBrush" Value="#D9E1E9"/>
+    </Style>
+  </Window.Styles>
+  <Grid Margin="20" RowDefinitions="Auto,Auto,Auto,Auto,3*,2*,Auto" RowSpacing="10">
+    <TextBlock Name="Heading" FontSize="20" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+    <Grid Grid.Row="1" ColumnDefinitions="*,2*,Auto" ColumnSpacing="8">
+      <TextBox Name="Uid" Classes="filter" Watermark="精确 UID">
+        <TextBox.InnerRightContent>
+          <Button Name="UidChoices" Classes="choice" AutomationProperties.Name="选择UID" ToolTip.Tip="选择UID">
+            <PathIcon Width="10" Height="6" Data="M0,0 L5,5 L10,0 L8.5,0 L5,3.4 L1.5,0 Z"/>
+          </Button>
+        </TextBox.InnerRightContent>
+      </TextBox>
+      <TextBox Grid.Column="1" Name="Keyword" Classes="filter" Watermark="关键词（消息、事件、堆栈）">
+        <TextBox.InnerRightContent>
+          <Button Name="KeywordChoices" Classes="choice" AutomationProperties.Name="选择关键词" ToolTip.Tip="选择关键词">
+            <PathIcon Width="10" Height="6" Data="M0,0 L5,5 L10,0 L8.5,0 L5,3.4 L1.5,0 Z"/>
+          </Button>
+        </TextBox.InnerRightContent>
+      </TextBox>
+      <Button Name="Apply" Classes="accent" MinHeight="36" Grid.Column="2" Content="筛选"/>
+    </Grid>
+    <Grid Grid.Row="2" ColumnDefinitions="*,*" ColumnSpacing="8">
+      <TextBox Name="From" Classes="filter" Watermark="起始日期（UTC）：yyyy-MM-dd">
+        <TextBox.InnerRightContent>
+          <Button Name="FromChoices" Classes="choice" AutomationProperties.Name="选择起始日期（UTC）" ToolTip.Tip="选择起始日期（UTC）">
+            <PathIcon Width="10" Height="6" Data="M0,0 L5,5 L10,0 L8.5,0 L5,3.4 L1.5,0 Z"/>
+          </Button>
+        </TextBox.InnerRightContent>
+      </TextBox>
+      <TextBox Grid.Column="1" Name="To" Classes="filter" Watermark="截止日期（UTC）：yyyy-MM-dd">
+        <TextBox.InnerRightContent>
+          <Button Name="ToChoices" Classes="choice" AutomationProperties.Name="选择截止日期（UTC）" ToolTip.Tip="选择截止日期（UTC）">
+            <PathIcon Width="10" Height="6" Data="M0,0 L5,5 L10,0 L8.5,0 L5,3.4 L1.5,0 Z"/>
+          </Button>
+        </TextBox.InnerRightContent>
+      </TextBox>
+    </Grid>
+    <StackPanel Grid.Row="3" Orientation="Horizontal" Spacing="8">
+      <Button Name="FirstFault" Classes="navigation" Content="首个异常及前后文"/>
+      <Button Name="All" Classes="navigation" Content="返回完整时间线"/>
+    </StackPanel>
+    <ListBox Grid.Row="4" Name="Records">
+      <ListBox.Resources>
+        <SolidColorBrush x:Key="SystemControlHighlightListAccentLowBrush" Color="#E8F1FA"/>
+        <SolidColorBrush x:Key="SystemControlHighlightListAccentMediumBrush" Color="#DDEBFA"/>
+        <SolidColorBrush x:Key="SystemControlHighlightListAccentHighBrush" Color="#D0E3F6"/>
+        <SolidColorBrush x:Key="SystemControlHighlightListLowBrush" Color="#EDF0F4"/>
+        <SolidColorBrush x:Key="SystemControlHighlightAltBaseHighBrush" Color="#172F49"/>
+      </ListBox.Resources>
+      <ListBox.Styles>
+        <Style Selector="ListBoxItem">
+          <Setter Property="BorderThickness" Value="3,0,0,0"/>
+          <Setter Property="BorderBrush" Value="Transparent"/>
+          <Setter Property="CornerRadius" Value="4"/>
+          <Setter Property="Margin" Value="3,1"/>
+        </Style>
+        <Style Selector="ListBoxItem:selected">
+          <Setter Property="BorderBrush" Value="#4075A3"/>
+        </Style>
+      </ListBox.Styles>
+    </ListBox>
+    <TextBox Grid.Row="5" Name="Detail" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" Watermark="选择记录查看详情"/>
+    <Grid Grid.Row="6" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+      <TextBlock Name="Summary" TextWrapping="Wrap" VerticalAlignment="Center"/>
+      <Button Grid.Column="1" Name="Prev" Classes="navigation" Content="上一页"/><Button Grid.Column="2" Name="Next" Classes="navigation" Content="下一页"/>
+    </Grid>
+  </Grid>
+</Window>

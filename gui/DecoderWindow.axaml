@@ -1,0 +1,77 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Logos.Decoder.DecoderWindow" Title="Logos 解码器" Icon="/Assets/Logos.png"
+        Width="780" Height="640" MinWidth="610" MinHeight="555"
+        WindowStartupLocation="CenterScreen" Background="#F4F6F9" Foreground="#172C46">
+  <Window.Styles>
+    <Style Selector="Button"><Setter Property="CornerRadius" Value="7"/><Setter Property="Padding" Value="12,6"/></Style>
+    <Style Selector="Button.action">
+      <Setter Property="Height" Value="36"/>
+      <Setter Property="Padding" Value="14,0"/>
+      <Setter Property="HorizontalContentAlignment" Value="Center"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+    </Style>
+    <Style Selector="Button.picker">
+      <Setter Property="Width" Value="112"/>
+      <Setter Property="Background" Value="White"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="BorderBrush" Value="#ADBDCE"/>
+      <Setter Property="Foreground" Value="#25496C"/>
+    </Style>
+    <Style Selector="Button.export:disabled /template/ ContentPresenter#PART_ContentPresenter">
+      <Setter Property="Background" Value="#E1E7EF"/>
+      <Setter Property="Foreground" Value="#5D6B7D"/>
+      <Setter Property="BorderBrush" Value="#CFD9E4"/>
+    </Style>
+    <Style Selector="TextBlock.section"><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="FontSize" Value="16"/></Style>
+  </Window.Styles>
+  <Grid Margin="24,18" RowDefinitions="Auto,*,Auto,Auto" RowSpacing="14">
+    <StackPanel Orientation="Horizontal" Spacing="12">
+      <Image Source="/Assets/Logos.png" Width="44" Height="44"/>
+      <TextBlock Text="Logos 解码器" FontSize="24" FontWeight="SemiBold" VerticalAlignment="Center"/>
+    </StackPanel>
+    <Border Grid.Row="1" Name="DropZone" DragDrop.AllowDrop="True" Background="White" BorderBrush="#CFD9E4" BorderThickness="1" CornerRadius="12" Padding="16,12">
+      <Grid RowDefinitions="Auto,1,*" RowSpacing="9">
+        <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+          <TextBlock Name="FileCount" Classes="section" VerticalAlignment="Center"/>
+          <Button Grid.Column="1" Name="ClearFiles" Content="清空列表" Background="Transparent" IsVisible="False"/>
+          <Button Grid.Column="2" Name="PickFiles" Classes="action picker" Content="添加文件…"/>
+        </Grid>
+        <Border Grid.Row="1" Background="#DFE6ED"/>
+        <Grid Grid.Row="2">
+          <StackPanel Name="EmptyState" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="5" IsHitTestVisible="False">
+            <TextBlock Text="将日志文件拖到这里" FontSize="18" HorizontalAlignment="Center"/>
+            <TextBlock Text="支持一次添加多个文件" Foreground="#56697B" HorizontalAlignment="Center"/>
+          </StackPanel>
+          <ScrollViewer><StackPanel Name="FileRows" Spacing="4"/></ScrollViewer>
+        </Grid>
+      </Grid>
+    </Border>
+    <Border Grid.Row="2" Background="White" CornerRadius="12" Padding="16,12" BorderThickness="1" BorderBrush="#CFD9E4">
+      <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="Auto,*,Auto" RowSpacing="8" ColumnSpacing="16">
+        <TextBlock Text="导出密钥" VerticalAlignment="Center" FontWeight="SemiBold"/>
+        <TextBlock Grid.Column="1" Name="KeyName" Text="请选择 export-keys.json" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+        <Button Grid.Column="2" Name="PickKeys" Classes="action picker" Content="选择配置…"/>
+        <TextBlock Grid.Row="1" Text="保存格式" VerticalAlignment="Center" FontWeight="SemiBold"/>
+        <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Spacing="16" Orientation="Horizontal">
+          <RadioButton Name="TextFormat" Content="文本 (.txt)" IsChecked="True" GroupName="format"/>
+          <RadioButton Name="JsonFormat" Content="JSONL" GroupName="format"/>
+        </StackPanel>
+      </Grid>
+    </Border>
+    <Grid Grid.Row="3" RowDefinitions="Auto,Auto,Auto" RowSpacing="4">
+      <ProgressBar Name="BusyBar" Height="3" IsVisible="False"/>
+      <ScrollViewer Grid.Row="1" MaxHeight="60"><SelectableTextBlock Name="Status" TextWrapping="Wrap"/></ScrollViewer>
+      <Grid Grid.Row="2" ColumnDefinitions="*,Auto">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <Button Name="Preview" Content="预览时间线" IsVisible="False"/>
+          <Button Name="OpenResult" Content="打开文件" IsVisible="False"/>
+          <Button Name="Reveal" Content="打开所在文件夹" IsVisible="False"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+          <Button Name="CancelJob" Content="取消" IsVisible="False"/>
+          <Button Name="Save" Classes="action accent export" Content="解密并另存为…"/>
+        </StackPanel>
+      </Grid>
+    </Grid>
+  </Grid>
+</Window>

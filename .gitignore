@@ -17,3 +17,6 @@ Docs/plans/
 
 /cli/**/bin/
 /cli/**/obj/
+/gui/bin/
+/gui/obj/
+/gui/.avalonia-build-tasks/
