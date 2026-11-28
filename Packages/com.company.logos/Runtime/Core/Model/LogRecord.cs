@@ -121,6 +121,12 @@ namespace Logos
             StackTruncated = stackTruncated;
         }
 
+        // 仅在启动暂存队首首次移交时绑定配额；复用原文、身份、时间和序号，保留延迟 ID。
+        internal LogRecord WithStartupDay(QuotaDayTag tag) =>
+            new LogRecord(Level, SourceId, EventTypeId, recordPrefix ?? recordId, Sequence, UtcTimestamp,
+                MonotonicTimestamp, Message, Stack, Context, MessageTruncated, StackTruncated, tag,
+                recordPrefix != null, DiagnosticMetadata);
+
         private static string BoundedText(string value, int limit, string name)
         {
             if (value != null && value.Length > limit)

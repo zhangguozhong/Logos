@@ -264,7 +264,7 @@ namespace Logos
                 if (!queue.HasQueuedInput)
                     return false;
                 bool holdNewNormal = holdNewNormalUntilRetry && !stop.Requested && begin < retryIdentityTicks;
-                if (!queue.TryPinHead(buffered.ReadyClassMask & ~blockedClasses, out pin, out var decision, holdNewNormal))
+                if (!queue.TryPinHead(buffered.ReadyClassMask & ~blockedClasses, out pin, out var decision, holdNewNormal, resolveStartup: true))
                 {
                     contention = decision == QueueTakeDecision.ContentionRejected;
                     return false;
@@ -279,6 +279,11 @@ namespace Logos
                 {
                     ResolveCurrentPin(false, null);
                     return false;
+                }
+                if (pin.StartupFailure != AdmissionReason.Accepted)
+                {
+                    ResolveCurrentPin(true, pin.StartupFailure);
+                    return true;
                 }
                 BatchTransferResult result = buffered.TransferBatch(new LogBatchView(batch, 0, 1), context);
                 if (!ValidTransfer(result, context))

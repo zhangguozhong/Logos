@@ -4,6 +4,28 @@ namespace Logos
 {
     internal sealed partial class LoggingPipeline
     {
+        // 只为启用了诊断的 Unity 实例保存一次。切号和首次 Update 都不能改变启动事实。
+        internal sealed class SessionStartObservation
+        {
+            internal readonly LogContext Context;
+            internal readonly DateTime Utc;
+            internal readonly long Ticks;
+
+            internal SessionStartObservation(LogContext context, DateTime utc, long ticks)
+            {
+                Context = context;
+                Utc = utc;
+                Ticks = ticks;
+            }
+        }
+
+        internal SessionStartObservation CaptureSessionStart()
+            => new SessionStartObservation(ReadControlState().Context, DateTime.UtcNow, clock.TimestampTicks);
+
+        internal AdmissionResult TryAcceptSessionStart(SessionStartObservation start, DiagnosticRecordMetadata metadata, string message)
+            => TryAcceptCore(LogLevel.Info, LogSource.Application, message, null, "session.start", Generation,
+                metadata, true, false, false, null, capturedContext: start.Context, sessionStart: start);
+
         private DiagnosticControlState diagnosticControl;
         private DiagnosticBudgetSnapshot diagnosticBudget;
         private readonly long[] diagnosticSamples = new long[PolicySnapshot.SourceCount * 6];

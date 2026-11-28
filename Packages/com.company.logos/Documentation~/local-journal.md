@@ -11,7 +11,9 @@ bool installed = LogosSdk.TryInitialize(
     out StorageLoggingSession owner, out StorageInitializationStatus status);
 ```
 
-保留返回的 owner。安装成功后，通过 `owner.GetHealthSnapshot()` 查看存储状态。启动和恢复期间可能返回 `NotReady` 或 `Recovering`，期间被拒绝的日志不会在就绪后补录。`Ready` 表示存储恢复完成；判断能否继续写入还需结合 `EffectiveDay`、`TimeReason` 和剩余额度。
+保留返回的 owner。安装成功后，通过 `owner.GetHealthSnapshot()` 查看存储状态。首次恢复期间，显式 Error、Fatal、异常和带事件 ID 的 KeyInfo 可以在现有额度内暂存。请检查每次调用的返回值。普通 Info 和 Warn 在此期间仍可能返回 NotReady 或 Recovering。已接收但尚未写入文件的记录可能随进程终止而丢失。被拒绝的记录不会在就绪后补录。`Ready` 表示存储恢复完成；判断能否继续写入还需结合 `EffectiveDay`、`TimeReason` 和剩余额度。
+
+启用诊断时，内置的 `session.start` 保留 Unity 实例启动时的时间和身份。恢复期间切号也会保留先前已接收记录的原归属。
 
 ## 配置留存范围
 

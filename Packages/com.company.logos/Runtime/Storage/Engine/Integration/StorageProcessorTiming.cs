@@ -350,6 +350,7 @@ namespace Logos.Storage
                 }
             }
         }
+        private bool startupSettled;
         private void PublishGate()
         {
             if (admission == null)
@@ -380,10 +381,38 @@ namespace Logos.Storage
                 if ((clearTargets != null && clearTargets.Contains(day)) || (journal.Status == JournalStatus.Ready && journal.CurrentHeader == null))
                     n = e = AdmissionReason.Cleared;
             }
-            publishedQuotaTag = admission.SetGate(new QuotaAdmissionGate(day, state, n, e));
+            var gate = new QuotaAdmissionGate(day, state, n, e);
+            if (!startupSettled && admission is IStartupAdmissionController startup)
+            {
+                var decision = StartupDecision(gate);
+                publishedQuotaTag = startup.SetStartupGate(gate, decision);
+                startupSettled = decision != AdmissionReason.Recovering;
+            }
+            else
+                publishedQuotaTag = admission.SetGate(gate);
             if (!budgetTag.Equals(publishedQuotaTag))
                 InvalidateDiagnosticBudget();
         }
+        private AdmissionReason StartupDecision(QuotaAdmissionGate gate)
+        {
+            if (journal.Status == JournalStatus.Blocked || journal.Status == JournalStatus.DirectoryBusy)
+                return AdmissionReason.StorageFault;
+            // 尚无权威日期时，定日清理先等恢复发现首日再判断。清全部可以立即作废。
+            var pending = Volatile.Read(ref pendingClear);
+            if (StartupClearTargetsDay(clearTargets) || StartupClearTargetsDay(pending))
+                return AdmissionReason.Cleared;
+            if (gate.State == QuotaAdmissionState.Closed || gate.State == QuotaAdmissionState.DayTransition)
+                return gate.NormalDecision;
+            if (gate.State != QuotaAdmissionState.Ready)
+                return AdmissionReason.Recovering;
+            if (journal.TimeDecision.RequiresConfirmation)
+                return journal.TimeDecision.Kind == JournalTimeDecisionKind.TimeUncertain
+                    ? AdmissionReason.TimeUncertain : AdmissionReason.TimeConfirmationRequired;
+            return AdmissionReason.Accepted;
+        }
+        private bool StartupClearTargetsDay(ClearScope scope) =>
+            scope != null && (scope.Kind == 1 || (journal.CurrentEffectiveDay.HasValue && scope.Contains(journal.CurrentEffectiveDay.Value)));
+
         private bool ClassCanReceive(bool isError)
         {
             return isError

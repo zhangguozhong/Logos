@@ -200,7 +200,7 @@ namespace Logos
             => TryAcceptCore(level, source, message, stack, eventTypeId, expectedGeneration, diagnosticMetadata, diagnosticCall, keyInfo, automaticInfo, null, capturedContext: capturedContext);
 
         private AdmissionResult TryAcceptCore(LogLevel level, LogSource source, string message, string stack, string eventTypeId,
-            long? expectedGeneration, DiagnosticRecordMetadata diagnosticMetadata, bool diagnosticCall, bool keyInfo, bool automaticInfo, RepeatSlot summary, bool terminal = false, LogContext capturedContext = null)
+            long? expectedGeneration, DiagnosticRecordMetadata diagnosticMetadata, bool diagnosticCall, bool keyInfo, bool automaticInfo, RepeatSlot summary, bool terminal = false, LogContext capturedContext = null, SessionStartObservation sessionStart = null)
         {
             // 全部外部观测共用序号。任何拒绝或争用都会留下间隔，内部摘要不占号。
             bool externalRun = repeatSlots != null && options.ConsecutiveUnityInfo && summary == null;
@@ -259,7 +259,9 @@ namespace Logos
                 // 在速率、容量、ID 分配或有界字符串复制之前检查未截断的标识符。
                 if ((keyInfo && string.IsNullOrEmpty(eventTypeId)) || (eventTypeId != null && eventTypeId.Length > LogRecord.MaxIdLength))
                     return result = new AdmissionResult(AdmissionReason.InvalidInput);
-                AdmissionReason classDecision = queue.PrecheckAdmission(level, out quotaTag);
+                bool startupEligible = sessionStart != null || !automaticInfo && !diagnosticCall && summary == null
+                    && (level >= LogLevel.Error || (level == LogLevel.Info && keyInfo && source == LogSource.Application));
+                AdmissionReason classDecision = queue.PrecheckAdmission(level, out quotaTag, startupEligible);
                 if (classDecision != AdmissionReason.Accepted)
                     return result = new AdmissionResult(classDecision);
                 if (summary != null && (capturedContext == null
@@ -312,7 +314,7 @@ namespace Logos
                 bool shortWarn = level == LogLevel.Warn && clock is StopwatchClock && diagnosticMetadata == null
                     && summary == null && (message?.Length ?? 0) <= options.MaxMessageChars
                     && (stack?.Length ?? 0) <= options.MaxStackChars;
-                QueueDecision reserve = queue.TryReserve(level, memoryBytes, out token, out var quotaReason, terminal, shortWarn);
+                QueueDecision reserve = queue.TryReserve(level, memoryBytes, out token, out var quotaReason, terminal, shortWarn, startupEligible);
                 if (reserve != QueueDecision.Reserved)
                     return result = MapQueue(reserve, AdmissionStage.Reservation, quotaReason);
                 reserved = true;
@@ -327,12 +329,12 @@ namespace Logos
                 }
                 string boundedMessage = BoundedCopy(message, options.MaxMessageChars, out bool messageTruncated);
                 string boundedStack = BoundedCopy(stack, options.MaxStackChars, out bool stackTruncated);
-                long timestamp = clock.TimestampTicks;
+                long timestamp = sessionStart?.Ticks ?? clock.TimestampTicks;
                 // 在预留和有界复制之后、提交之前赋值。提交失败可能留下编号间隙。
                 long number = Interlocked.Increment(ref sequence);
                 if (number <= 0)
                     throw new InvalidOperationException("Pipeline sequence exhausted.");
-                var utc = recovered == 0 || !options.LegacyRepeatSummaryForBenchmark ? DateTime.UtcNow : repeatSlot.FirstUtc;
+                var utc = recovered == 0 || !options.LegacyRepeatSummaryForBenchmark ? (sessionStart?.Utc ?? DateTime.UtcNow) : repeatSlot.FirstUtc;
                 var record = new LogRecord(level, SourceName(source), eventTypeId, recordPrefix, number, recovered == 0 ? utc : repeatSlot.FirstUtc,
                     recovered == 0 ? timestamp : repeatSlot.PendingTicks,
                     boundedMessage, boundedStack, contextView, messageTruncated, stackTruncated, token.QuotaDayTag, true, diagnosticMetadata);

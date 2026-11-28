@@ -247,7 +247,15 @@ namespace Logos.Storage
 
                 if (recovery != null)
                 {
-                    RecoverOneBlock();
+                    // 每块独立做完整 Decode。首个单元保持原有停止推进语义，后续单元逐个检查预算；
+                    // 即使调用者传入无限截止时间，单步也最多读取 8 个 MaxWireBlockBytes 的块。
+                    for (int unit = 0; unit < 8; unit++)
+                    {
+                        RecoverOneBlock();
+                        if (recovery == null || !recovery.AuthenticatedBlockLastStep
+                            || context.ShouldYield || context.StopRequested)
+                            break;
+                    }
                     return;
                 }
 
@@ -265,7 +273,7 @@ namespace Logos.Storage
 
                 if (phase == 2)
                 {
-                    ReadOneDaySlot();
+                    ScanDayPage(context);
                     return;
                 }
 
@@ -399,7 +407,7 @@ namespace Logos.Storage
             }
         }
 
-        private void ReadOneDaySlot()
+        private void ScanDayPage(JournalStepContext context)
         {
             if (slot == 1024)
             {
@@ -408,6 +416,28 @@ namespace Logos.Storage
                 return;
             }
 
+            int count = Math.Min(64, summaries.Length - slot);
+            store.ReadDayPage(slot, count, scratch);
+            for (int i = 0; i < count; i++)
+            {
+                int end = (i + 1) * 1024;
+                for (int offset = i * 1024; offset < end; offset += Vector<byte>.Count)
+                {
+                    if (new Vector<byte>(scratch, offset) != Vector<byte>.Zero)
+                    {
+                        // 后续恢复可能复用 scratch，处理活跃槽后直接让出，下次从 slot 重新读取。
+                        ReadOneDaySlot();
+                        return;
+                    }
+                }
+                slot++;
+                if (context.ShouldYield || context.StopRequested)
+                    return;
+            }
+        }
+
+        private void ReadOneDaySlot()
+        {
             int index = slot++;
             var row = store.ReadDayForRecovery(
                 index,

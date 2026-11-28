@@ -146,6 +146,14 @@ namespace Logos.Storage
                 return JournalStateCodec.DecodeGlobal(buffer, key);
         }
 
+        // 独占目录下顺序读取连续槽；只用此页识别空槽，非空槽沿用原双副本认证及修复流程。
+        internal void ReadDayPage(int firstSlot, int count, byte[] destination)
+        {
+            verifyOwner();
+            stream.Position = DayRegionOffset + firstSlot * 1024L;
+            JournalIo.ReadExactly(stream, destination, 0, count * 1024);
+        }
+
         internal JournalDayState ReadDay(int slot, out bool hadEvidence)
         {
             return ReadDayCore(slot, out hadEvidence, null, 0, 0, out _, out _);

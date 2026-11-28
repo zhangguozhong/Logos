@@ -301,7 +301,7 @@ namespace Logos
             workerControl = processor as ILogWorkerControl;
             buffered = processor as IBufferedLogBatchProcessor;
             if (buffered != null)
-                queue.EnableQuotaGate();
+                queue.EnableQuotaGate(processor is IStartupLogProcessor);
             this.clock = clock ?? new StopwatchClock();
             batch = new LogRecord[this.options.BatchCount];
             wake = new AutoResetEvent(false);

@@ -10,6 +10,8 @@ namespace Logos.Storage
     {
         internal static bool IsWindows => RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
         private static bool Mac => RuntimeInformation.IsOSPlatform(OSPlatform.OSX);
+        // Intel 与 Rosetta 进程的无后缀 Darwin 符号返回旧版 inode 布局。
+        internal static readonly bool MacInode64 = Mac && RuntimeInformation.ProcessArchitecture == Architecture.X64;
         private static bool DarwinAbi =>
 #if UNITY_IOS && !UNITY_EDITOR
             true;
@@ -95,7 +97,11 @@ namespace Logos.Storage
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "flock", SetLastError = true)]
         private static extern int FlockMac(int fd, int operation);
 
+#if UNITY_IOS && !UNITY_EDITOR
+        [DllImport(PosixLibrary, EntryPoint = "logos_ios_realpath", SetLastError = true)]
+#else
         [DllImport(PosixLibrary, EntryPoint = "realpath", SetLastError = true)]
+#endif
         private static extern IntPtr RealpathUnix(string path, IntPtr output);
 
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "realpath", SetLastError = true)]
@@ -107,6 +113,9 @@ namespace Logos.Storage
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "stat", SetLastError = true)]
         private static extern int StatMac(string path, byte[] output);
 
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "stat$INODE64", SetLastError = true)]
+        private static extern int StatMacInode64(string path, byte[] output);
+
         // 固定路径预先编码为以零结尾的 UTF-8；避免每次 stat 的字符串封送分配。
         [DllImport(PosixLibrary, EntryPoint = "stat", SetLastError = true)]
         private static extern int StatUnixEncoded(byte[] path, byte[] output);
@@ -114,11 +123,17 @@ namespace Logos.Storage
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "stat", SetLastError = true)]
         private static extern int StatMacEncoded(byte[] path, byte[] output);
 
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "stat$INODE64", SetLastError = true)]
+        private static extern int StatMacEncodedInode64(byte[] path, byte[] output);
+
         [DllImport(PosixLibrary, EntryPoint = "fstat", SetLastError = true)]
         private static extern int FstatUnix(int fd, byte[] output);
 
         [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "fstat", SetLastError = true)]
         private static extern int FstatMac(int fd, byte[] output);
+
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "fstat$INODE64", SetLastError = true)]
+        private static extern int FstatMacInode64(int fd, byte[] output);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern uint GetFinalPathNameByHandleW(
@@ -236,7 +251,7 @@ namespace Logos.Storage
                     return HandleIdentity(h);
             }
             byte[] b = new byte[512];
-            int r = Mac ? StatMac(path, b) : StatUnix(path, b);
+            int r = MacInode64 ? StatMacInode64(path, b) : Mac ? StatMac(path, b) : StatUnix(path, b);
             if (r != 0)
                 throw new IOException("Filesystem identity unavailable.");
             return Extract(b);
@@ -247,7 +262,8 @@ namespace Logos.Storage
         {
             if (IntPtr.Size != 8)
                 throw new NotSupportedException("Unverified native stat ABI.");
-            int result = Mac ? StatMacEncoded(encodedPath, scratch) : StatUnixEncoded(encodedPath, scratch);
+            int result = MacInode64 ? StatMacEncodedInode64(encodedPath, scratch)
+                : Mac ? StatMacEncoded(encodedPath, scratch) : StatUnixEncoded(encodedPath, scratch);
             if (result != 0)
                 throw new IOException("Filesystem identity unavailable.");
             int deviceBytes = DarwinAbi ? 4 : 8;
@@ -273,9 +289,8 @@ namespace Logos.Storage
                 return b;
             }
             byte[] data = new byte[512];
-            int r = Mac
-                ? FstatMac(h.DangerousGetHandle().ToInt32(), data)
-                : FstatUnix(h.DangerousGetHandle().ToInt32(), data);
+            int fd = h.DangerousGetHandle().ToInt32();
+            int r = MacInode64 ? FstatMacInode64(fd, data) : Mac ? FstatMac(fd, data) : FstatUnix(fd, data);
             if (r != 0)
                 throw new IOException("Filesystem identity unavailable.");
             return Extract(data);

@@ -114,7 +114,11 @@ namespace Logos
             if (!OnMainThread || !pipeline.Start())
                 return false;
             if (LogosLog.Bind(pipeline))
+            {
+                if (sessionStartMetadata != null && sessionStartObservation == null)
+                    sessionStartObservation = pipeline.CaptureSessionStart();
                 return true;
+            }
             RequestDetach(TimeSpan.Zero, true);
             return false;
         }

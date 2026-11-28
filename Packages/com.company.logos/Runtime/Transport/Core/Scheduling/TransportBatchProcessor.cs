@@ -4,7 +4,7 @@ using Logos.Storage;
 namespace Logos.Transport
 {
     // 组合运行于原 Core 工作线程。Storage 仍是唯一 Journal 所有者。
-    internal sealed class TransportBatchProcessor : IIncidentInfoDurableProcessor, ILogAppLifecycleReceiver, IClearMemoryBarrier
+    internal sealed class TransportBatchProcessor : IStartupLogProcessor, IIncidentInfoDurableProcessor, ILogAppLifecycleReceiver, IClearMemoryBarrier
     {
         private readonly StorageBatchProcessor storage;
         internal TransferStateStore Store

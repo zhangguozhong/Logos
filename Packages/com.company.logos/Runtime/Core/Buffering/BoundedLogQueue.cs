@@ -93,7 +93,7 @@ namespace Logos
         }
     }
     // 普通与错误分区各自限制数量和字节。生产者发布槽位；固定消费者移交后才归还槽位。
-    internal sealed class BoundedLogQueue : ILogAdmissionController, IWorkerQueuedInput
+    internal sealed class BoundedLogQueue : ILogAdmissionController, IWorkerQueuedInput, IStartupAdmissionController
     {
         private readonly object consumerGate = new object();
         private readonly object gate = new object();
@@ -119,30 +119,47 @@ namespace Logos
         private int pinned = -1;
         private LogContext lastNormalTransfer;
         private readonly long[] controlDrops = new long[6 * HealthCounters.ReasonCount];
-        internal void EnableQuotaGate()
+        private bool startupEnabled;
+        // null 表示首次恢复仍在进行。两个分区共用首个决议，后续恢复、跨日和清理均不能重新打开暂存。
+        private QuotaSnapshot startupSettlement;
+        private int startupQueued;
+        private AdmissionReason startupNormalFailure, startupErrorFailure;
+        internal void EnableQuotaGate(bool allowStartup = false)
         {
             lock (gate)
                 if (quota == null)
+                {
+                    startupEnabled = allowStartup;
                     Volatile.Write(ref quota, new QuotaSnapshot(new QuotaAdmissionGate(0, QuotaAdmissionState.NotReady, AdmissionReason.NotReady, AdmissionReason.NotReady), default));
+                }
         }
         public bool HasQueuedInput => Volatile.Read(ref queuedCount) != 0 || Volatile.Read(ref pinned) >= 0;
         internal bool IsDayTransition => Volatile.Read(ref quota)?.Gate.State == QuotaAdmissionState.DayTransition;
         internal AdmissionReason PrecheckAdmission(LogLevel level) => PrecheckAdmission(level, out _);
-        internal AdmissionReason PrecheckAdmission(LogLevel level, out QuotaDayTag? tag)
+        internal AdmissionReason PrecheckAdmission(LogLevel level, out QuotaDayTag? tag, bool startupEligible = false)
         {
             QuotaSnapshot view = Volatile.Read(ref quota);
+            if (startupEligible && startupEnabled && Volatile.Read(ref startupSettlement) == null)
+            {
+                tag = null;
+                return AdmissionReason.Accepted;
+            }
             tag = view?.Tag;
             return view == null ? AdmissionReason.Accepted : level >= LogLevel.Error ? view.Gate.ErrorDecision : view.Gate.NormalDecision;
         }
         public QuotaDayTag SetGate(QuotaAdmissionGate value)
+            => SetStartupGate(value, AdmissionReason.StorageFault);
+
+        public QuotaDayTag SetStartupGate(QuotaAdmissionGate value, AdmissionReason disposition)
         {
+            bool settle = startupEnabled && disposition != AdmissionReason.Recovering && Volatile.Read(ref startupSettlement) == null;
             var current = Volatile.Read(ref quota);
-            if (current != null && current.Gate.Equals(value))
+            if (!settle && current != null && current.Gate.Equals(value))
                 return current.Tag;
             lock (consumerGate)
             lock (gate)
             {
-                if (quota != null && quota.Gate.Equals(value))
+                if (!settle && quota != null && quota.Gate.Equals(value))
                     return quota.Tag;
                 ulong previous = quota?.Tag.Generation ?? 0;
                 if (previous == ulong.MaxValue)
@@ -152,7 +169,23 @@ namespace Logos
                 }
                 lastNormalTransfer = null;
                 var tag = new QuotaDayTag(value.DayId, previous + 1);
-                Volatile.Write(ref quota, new QuotaSnapshot(value, tag));
+                var update = new QuotaSnapshot(value, tag);
+                if (settle && startupSettlement == null)
+                {
+                    startupNormalFailure = disposition == AdmissionReason.Accepted ? value.NormalDecision : disposition;
+                    startupErrorFailure = disposition == AdmissionReason.Accepted ? value.ErrorDecision : disposition;
+                    Volatile.Write(ref startupSettlement, update);
+                }
+                else if (startupSettlement != null)
+                {
+                    // 只冻结受影响的分区。普通额度耗尽不应淘汰已暂存的 Error；关闭过的配额绝不能在重开时复活。
+                    bool changedDay = startupSettlement.Tag.DayId != value.DayId;
+                    if (startupNormalFailure == AdmissionReason.Accepted)
+                        startupNormalFailure = changedDay ? AdmissionReason.DayRolloverDropped : value.NormalDecision;
+                    if (startupErrorFailure == AdmissionReason.Accepted)
+                        startupErrorFailure = changedDay ? AdmissionReason.DayRolloverDropped : value.ErrorDecision;
+                }
+                Volatile.Write(ref quota, update);
                 return tag;
             }
         }
@@ -172,7 +205,7 @@ namespace Logos
                     if ((classes & (part == 0 ? LogClassMask.Normal : LogClassMask.ErrorFatal)) == 0)
                         continue;
                     int index = partitions[part].Head;
-                    if (index == -1 || slots[index].Record.QuotaDayTag?.DayId != dayId)
+                    if (index == -1 || (slots[index].Record.QuotaDayTag ?? startupSettlement?.Tag)?.DayId != dayId)
                         continue;
                     ref Partition p = ref partitions[part];
                     ref Slot slot = ref slots[index];
@@ -321,7 +354,7 @@ namespace Logos
         // 生产者调用快速失败：不自旋、不等待容量或 I/O。冻结的输入是受信任的内部估算值。
         public QueueDecision TryReserve(LogLevel level, int estimatedBytes, out QueueReservation reservation)
             => TryReserve(level, estimatedBytes, out reservation, out _);
-        internal QueueDecision TryReserve(LogLevel level, int estimatedBytes, out QueueReservation reservation, out AdmissionReason quotaReason, bool terminalSummary = false, bool keepGate = false)
+        internal QueueDecision TryReserve(LogLevel level, int estimatedBytes, out QueueReservation reservation, out AdmissionReason quotaReason, bool terminalSummary = false, bool keepGate = false, bool startupEligible = false)
         {
             reservation = default;
             quotaReason = AdmissionReason.Accepted;
@@ -335,7 +368,7 @@ namespace Logos
             {
                 if (closed && (!terminalSummary || exhausted))
                     return QueueDecision.Closed;
-                AdmissionReason admission = PrecheckAdmission(level);
+                AdmissionReason admission = PrecheckAdmission(level, out var reservedTag, startupEligible);
                 quotaReason = admission;
                 if (admission != AdmissionReason.Accepted)
                     return admission == AdmissionReason.NotReady ? QueueDecision.NotReady : QueueDecision.QuotaRejected;
@@ -364,7 +397,7 @@ namespace Logos
                 reservedCount++;
                 p.PeakCount = Math.Max(p.PeakCount, count);
                 p.PeakBytes = Math.Max(p.PeakBytes, bytes);
-                reservation = new QueueReservation(this, generation, slot.Lease, index, quota?.Tag);
+                reservation = new QueueReservation(this, generation, slot.Lease, index, reservedTag);
                 return QueueDecision.Reserved;
             }
             finally
@@ -395,9 +428,16 @@ namespace Logos
                 if (!IsLiveReservation(reservation))
                     return QueueDecision.InvalidReservation;
                 // 预留后生产者会离开锁复制文本。回来时要同时核对队列当前配额、预留标签和记录标签，跨日或门状态变更都可能使提交失效。
-                if (quota != null && (!reservation.QuotaDayTag.HasValue || !reservation.QuotaDayTag.Value.Equals(quota.Tag) || !record.QuotaDayTag.HasValue || !record.QuotaDayTag.Value.Equals(reservation.QuotaDayTag.Value)))
+                if (quota != null && !Nullable.Equals(record.QuotaDayTag, reservation.QuotaDayTag))
                     return QueueDecision.StaleQuotaDay;
-                quotaReason = PrecheckAdmission(record.Level);
+                if (quota != null && !reservation.QuotaDayTag.HasValue && startupEnabled)
+                    quotaReason = StartupRecordDecision(record.Level);
+                else
+                {
+                    if (quota != null && !Nullable.Equals(reservation.QuotaDayTag, quota.Tag))
+                        return QueueDecision.StaleQuotaDay;
+                    quotaReason = PrecheckAdmission(record.Level);
+                }
                 if (quotaReason != AdmissionReason.Accepted)
                     return QueueDecision.QuotaRejected;
                 ref Slot slot = ref slots[reservation.Slot];
@@ -408,6 +448,8 @@ namespace Logos
                 Interlocked.Add(ref p.Bytes, actualBytes - slot.Bytes);
                 slot.Bytes = actualBytes;
                 slot.Record = record;
+                if (quota != null && !record.QuotaDayTag.HasValue && startupEnabled)
+                    Interlocked.Increment(ref startupQueued);
                 slot.State = SlotState.Queued;
                 // 只有已提交槽位进入 FIFO。更早的预留仍可继续复制，不阻塞当前队首。
                 reservedCount--;
@@ -534,16 +576,18 @@ namespace Logos
             {
                 get;
             }
-            internal HeadLease(BoundedLogQueue owner, int index, ulong lease, LogRecord record)
+            internal readonly AdmissionReason StartupFailure;
+            internal HeadLease(BoundedLogQueue owner, int index, ulong lease, LogRecord record, AdmissionReason startupFailure = AdmissionReason.Accepted)
             {
                 Owner = owner;
                 Index = index;
                 Lease = lease;
                 Record = record;
+                StartupFailure = startupFailure;
             }
         }
         // 缓冲后端一次借用一个已提交队首。借用期间槽位仍占队列容量，直到 ResolvePin 确认移走或原位归还。
-        internal bool TryPinHead(LogClassMask classes, out HeadLease lease, out QueueTakeDecision decision, bool holdNewNormal = false)
+        internal bool TryPinHead(LogClassMask classes, out HeadLease lease, out QueueTakeDecision decision, bool holdNewNormal = false, bool resolveStartup = false)
         {
             lease = default;
             decision = QueueTakeDecision.Empty;
@@ -566,6 +610,13 @@ namespace Logos
                         && slots[normal].Record.Context.IdentityContextVersion > lastNormalTransfer.IdentityContextVersion)
                         normal = -1;
                 }
+                AdmissionReason normalFailure = AdmissionReason.Accepted, errorFailure = AdmissionReason.Accepted;
+                bool checkStartup = resolveStartup && Volatile.Read(ref startupQueued) != 0;
+                if (checkStartup)
+                {
+                    CheckStartupHead(normal, LogClassMask.Normal, ref classes, out normalFailure);
+                    CheckStartupHead(error, LogClassMask.ErrorFatal, ref classes, out errorFailure);
+                }
                 if ((classes & LogClassMask.Normal) == 0)
                     normal = -1;
                 if ((classes & LogClassMask.ErrorFatal) == 0)
@@ -575,14 +626,39 @@ namespace Logos
                     return false;
                 // 借出的索引留在环首，生产者可以同时追加队尾；回滚无需重新插入记录。
                 ref Slot slot = ref slots[index];
+                AdmissionReason failure = index == error ? errorFailure : normalFailure;
+                // 临时借用副本绑定首日，回滚仍保留原队首；下次借用必须重新检查清理和日切。
+                var record = slot.Record;
+                if (checkStartup && !record.QuotaDayTag.HasValue && failure == AdmissionReason.Accepted)
+                    record = record.WithStartupDay(startupSettlement.Tag);
                 pinned = index;
-                lease = new HeadLease(this, index, slot.Lease, slot.Record);
+                lease = new HeadLease(this, index, slot.Lease, record, failure);
                 decision = QueueTakeDecision.Taken;
                 return true;
             }
             finally
             {
                 Monitor.Exit(consumerGate);
+            }
+        }
+        // 决议只绑定首次生效的配额代际。过期项目由 worker 按原始等级回收，无须扫描或复制整条队列。
+        private AdmissionReason StartupRecordDecision(LogLevel level)
+        {
+            if (startupSettlement == null) return AdmissionReason.Accepted;
+            return level >= LogLevel.Error ? startupErrorFailure : startupNormalFailure;
+        }
+
+        private void CheckStartupHead(int index, LogClassMask group, ref LogClassMask classes, out AdmissionReason failure)
+        {
+            failure = AdmissionReason.Accepted;
+            if (index < 0 || slots[index].Record.QuotaDayTag.HasValue) return;
+            if (startupSettlement == null)
+                classes &= ~group;
+            else
+            {
+                failure = StartupRecordDecision(slots[index].Record.Level);
+                if (failure != AdmissionReason.Accepted)
+                    classes |= group;
             }
         }
         internal bool ResolvePin(HeadLease lease, bool remove, bool transferred = false)
@@ -616,8 +692,10 @@ namespace Logos
             slot.Next = p.Free;
             p.Free = index;
         }
-        private static void ResetSlot(ref Partition part, ref Slot slot)
+        private void ResetSlot(ref Partition part, ref Slot slot)
         {
+            if (startupEnabled && slot.Record != null && !slot.Record.QuotaDayTag.HasValue)
+                Interlocked.Decrement(ref startupQueued);
             Interlocked.Decrement(ref part.Count);
             Interlocked.Add(ref part.Bytes, -slot.Bytes);
             slot.Bytes = 0;

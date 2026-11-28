@@ -5,6 +5,7 @@ namespace Logos
     {
         private string diagnosticVersionBody;
         private DiagnosticRecordMetadata sessionStartMetadata;
+        private LoggingPipeline.SessionStartObservation sessionStartObservation;
         private long diagnosticStartTicks = -1, nextDiagnosticTicks, lastDiagnosticTick;
         private int sessionStartAttempts;
         private bool sessionStartFinished;
@@ -38,9 +39,9 @@ namespace Logos
         }
         internal void TickDiagnostics()
         {
-            if (sessionStartMetadata == null || sessionStartFinished || !OnMainThread)
+            if (sessionStartObservation == null || sessionStartFinished || !OnMainThread)
                 return;
-            // 只声明当前 Unity 实例的启动事实；使用提交时正常上下文，不推断业务会话启动。
+            // 内置存储可在首次恢复时占用原有普通队列。只有不支持暂存的后端沿用有界重试。
             if (detachRequested || !pipeline.TryGetControlTimestamp(Generation, out long now))
             {
                 sessionStartFinished = true;
@@ -58,7 +59,7 @@ namespace Logos
                 return;
             nextDiagnosticTicks = now > long.MaxValue - TimeSpan.TicksPerSecond ? long.MaxValue : now + TimeSpan.TicksPerSecond;
             sessionStartAttempts++;
-            var result = TryLogDiagnostic(LogLevel.Info, "session.start", sessionStartMetadata, diagnosticVersionBody);
+            var result = pipeline.TryAcceptSessionStart(sessionStartObservation, sessionStartMetadata, diagnosticVersionBody);
             // 仅后端尚未就绪或正在恢复时留给后续帧重试；策略拒绝、成功或其他失败都会结束本实例的启动事件。
             if (result.Reason != AdmissionReason.NotReady && result.Reason != AdmissionReason.Recovering)
                 sessionStartFinished = true;

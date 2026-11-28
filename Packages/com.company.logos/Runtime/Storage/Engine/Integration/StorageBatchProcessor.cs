@@ -3,7 +3,7 @@ using System.Threading;
 namespace Logos.Storage
 {
     /// <summary>单工作线程的有界存储所有者。构造仅分配；所有 I/O 都属于 Step。</summary>
-    public sealed partial class StorageBatchProcessor : IIncidentInfoDurableProcessor, IClearMemoryBarrier, ILogAppLifecycleReceiver
+    public sealed partial class StorageBatchProcessor : IStartupLogProcessor, IIncidentInfoDurableProcessor, IClearMemoryBarrier, ILogAppLifecycleReceiver
     {
         private readonly JournalSession journal;
         private readonly StorageIoMeasurements io;

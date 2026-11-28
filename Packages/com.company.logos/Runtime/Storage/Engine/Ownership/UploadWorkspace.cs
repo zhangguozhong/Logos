@@ -187,7 +187,7 @@ namespace Logos.Storage
             int fd = OpenAt(Fd(folder), ".", CloseOnExec | (Darwin ? 0x100000 : 0x10000), 0);
             if (fd < 0)
                 throw new IOException("Cannot open upload inventory.");
-            var stream = FdOpenDir(fd);
+            var stream = NativeLock.MacInode64 ? FdOpenDirInode64(fd) : FdOpenDir(fd);
             if (stream == IntPtr.Zero)
             {
                 CloseFd(fd);
@@ -199,7 +199,9 @@ namespace Logos.Storage
                 entry = Marshal.AllocHGlobal(2048);
                 while (true)
                 {
-                    if (ReadDir(stream, entry, out var result) != 0)
+                    IntPtr result;
+                    int status = NativeLock.MacInode64 ? ReadDirInode64(stream, entry, out result) : ReadDir(stream, entry, out result);
+                    if (status != 0)
                         throw new IOException("Cannot read upload inventory.");
                     if (result == IntPtr.Zero)
                         yield break;
@@ -424,8 +426,11 @@ namespace Logos.Storage
             else
                 throw new NotSupportedException("Unverified upload file stat ABI.");
             byte[] data = new byte[512];
-            int result = name == null ? Fstat(descriptor, data)
-                : FstatAt(descriptor, name, data, Darwin ? 0x20 : 0x100);
+            int result;
+            if (NativeLock.MacInode64)
+                result = name == null ? FstatInode64(descriptor, data) : FstatAtInode64(descriptor, name, data, 0x20);
+            else
+                result = name == null ? Fstat(descriptor, data) : FstatAt(descriptor, name, data, Darwin ? 0x20 : 0x100);
             if (result != 0)
                 throw new IOException("Cannot inspect private upload file.");
             bool regular = (BitConverter.ToUInt16(data, modeOffset) & 0xf000) == 0x8000;
@@ -436,14 +441,22 @@ namespace Logos.Storage
         }
         [DllImport(Lib, EntryPoint = "fdopendir", SetLastError = true)]
         static extern IntPtr FdOpenDir(int fd);
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "fdopendir$INODE64", SetLastError = true)]
+        static extern IntPtr FdOpenDirInode64(int fd);
         [DllImport(Lib, EntryPoint = "readdir_r", SetLastError = true)]
         static extern int ReadDir(IntPtr directory, IntPtr entry, out IntPtr result);
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "readdir_r$INODE64", SetLastError = true)]
+        static extern int ReadDirInode64(IntPtr directory, IntPtr entry, out IntPtr result);
         [DllImport(Lib, EntryPoint = "closedir", SetLastError = true)]
         static extern int CloseDir(IntPtr directory);
         [DllImport(Lib, EntryPoint = "fstat", SetLastError = true)]
         static extern int Fstat(int fd, byte[] output);
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "fstat$INODE64", SetLastError = true)]
+        static extern int FstatInode64(int fd, byte[] output);
         [DllImport(Lib, EntryPoint = "fstatat", SetLastError = true)]
         static extern int FstatAt(int directory, string name, byte[] output, int flags);
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "fstatat$INODE64", SetLastError = true)]
+        static extern int FstatAtInode64(int directory, string name, byte[] output, int flags);
         // Apple arm64 可变参数从栈读取，其他已支持的 ABI 从第四参数读取。
         // 同时提供这两处的 mode，确保 IL2CPP 对原生 openat 只生成一种签名。
         static int OpenAt(int directory, string name, int flags, int mode) =>
@@ -453,7 +466,11 @@ namespace Logos.Storage
             int registerMode, long x4, long x5, long x6, long x7, int stackMode);
         [DllImport(Lib, EntryPoint = "mkdirat", SetLastError = true)]
         static extern int MkdirAt(int directory, string name, int mode);
+#if UNITY_IOS && !UNITY_EDITOR
+        [DllImport(Lib, EntryPoint = "logos_ios_renameat", SetLastError = true)]
+#else
         [DllImport(Lib, EntryPoint = "renameat", SetLastError = true)]
+#endif
         static extern int RenameAt(int fromDir, string from, int toDir, string to);
         [DllImport(Lib, EntryPoint = "unlinkat", SetLastError = true)]
         static extern int UnlinkAt(int directory, string name, int flags);

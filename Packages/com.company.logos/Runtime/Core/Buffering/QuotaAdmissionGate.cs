@@ -69,6 +69,13 @@ namespace Logos
     {
         NoMatchingHead, Dropped, Contended, LeaseBusy
     }
+    // 仅内置存储（及转发它的传输组合）在首次恢复期间支持有限的关键记录暂存。
+    internal interface IStartupLogProcessor { }
+    internal interface IStartupAdmissionController
+    {
+        QuotaDayTag SetStartupGate(QuotaAdmissionGate gate, AdmissionReason startupDecision);
+    }
+
     public interface ILogAdmissionController
     {
         QuotaDayTag SetGate(QuotaAdmissionGate gate);
