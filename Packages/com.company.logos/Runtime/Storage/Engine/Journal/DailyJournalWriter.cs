@@ -41,6 +41,46 @@ namespace Logos.Storage
             }
         }
 
+
+        internal JournalAppendResult TryAppendMapped(SealedBlockLease sealedLease, ReadOnlySpan<byte> mappedWire)
+        {
+            if (sealedLease == null)
+                return JournalAppendResult.InvalidBlock;
+            CheckThread();
+            try
+            {
+                bool valid = sealedLease.TryConsume(out var bytes) && mappedWire.Length == bytes.Count;
+                if (!valid)
+                    return JournalAppendResult.InvalidBlock;
+                var result = TryAppendCore(bytes.Array, bytes.Offset, bytes.Count, sealedLease.Day,
+                    sealedLease.WriteGeneration, sealedLease, mappedWire);
+                ObserveAppend();
+                return result;
+            }
+            finally { sealedLease.Invalidate(); }
+        }
+
+        // 恢复探针借用映射内的完整密文。调用者必须在本次调用内保持映射只读并持有目录所有权。
+        internal JournalAppendResult TryAppendMapped(ReadOnlySpan<byte> wire, long day)
+        {
+            CheckThread();
+            if (wire.Length < BlockCodec.MinPhysicalWireBlockBytes || wire.Length > scratch.Length)
+                return JournalAppendResult.InvalidBlock;
+
+            // 现有解码器接收数组。认证使用 Journal 自有工作区，正式追加直接读取映射。
+            wire.CopyTo(scratch);
+            try
+            {
+                var result = TryAppendCore(scratch, 0, wire.Length, day, WriteGeneration, mappedWire: wire);
+                ObserveAppend();
+                return result;
+            }
+            finally
+            {
+                Array.Clear(scratch, 0, wire.Length);
+            }
+        }
+
         private void ObserveAppend()
         {
             // 观察唯一变化的文件为 O(1)；元数据失败不能推翻数据提交事实。
@@ -75,7 +115,8 @@ namespace Logos.Storage
             int length,
             long day,
             long writeGeneration,
-            SealedBlockLease lease = null
+            SealedBlockLease lease = null,
+            ReadOnlySpan<byte> mappedWire = default
         )
         {
             CheckThread();
@@ -105,8 +146,11 @@ namespace Logos.Storage
                 {
                     if (!lease.MatchesHeader(CurrentHeader))
                         return JournalAppendResult.StaleDay;
-                    if (!lease.MatchesKey(dataKey)
-                        || !lease.TryAuthenticate(wire, offset, length, out authenticatedHash))
+                    bool valid = lease.MatchesKey(dataKey)
+                        && (mappedWire.IsEmpty
+                            ? lease.TryAuthenticate(wire, offset, length, out authenticatedHash)
+                            : lease.TryAuthenticateMapped(mappedWire, out authenticatedHash));
+                    if (!valid)
                         return JournalAppendResult.InvalidBlock;
                     error = lease.IsErrorClass;
                 }
@@ -177,7 +221,7 @@ namespace Logos.Storage
                     return JournalAppendResult.Uncertain;
                 }
 
-                var intent = MakeIntent(wire, offset, length, error, authenticatedHash);
+                var intent = MakeIntentCore(wire, offset, length, error, authenticatedHash, mappedWire);
                 // 摘要所有权转交持久化意图，避免再扫描一次完整块。
                 authenticatedHash = null;
                 // 意图必须先写入日状态，再触碰目标数据区。若此时发布失败，恢复时仍有机会从幸存副本还原原先的提交下界。
@@ -198,7 +242,10 @@ namespace Logos.Storage
                 {
                     VerifyOwner();
                     writer.Position = intent.Start;
-                    writer.Write(wire, offset, length);
+                    if (mappedWire.IsEmpty)
+                        writer.Write(wire, offset, length);
+                    else
+                        writer.Write(mappedWire);
                     writer.Flush();
                     certain = true;
                 }
@@ -272,6 +319,10 @@ namespace Logos.Storage
         }
 
         private AppendIntent MakeIntent(byte[] wire, int offset, int length, bool error, byte[] authenticatedHash = null)
+            => MakeIntentCore(wire, offset, length, error, authenticatedHash);
+
+        private AppendIntent MakeIntentCore(byte[] wire, int offset, int length, bool error, byte[] authenticatedHash,
+            ReadOnlySpan<byte> mappedWire = default)
         {
             byte[] hash = authenticatedHash;
             if (hash == null)
@@ -287,8 +338,9 @@ namespace Logos.Storage
                 PreviousCommittedEnd = current.CommittedEnd,
                 ExpectedEnd = checked(current.CommittedEnd + length),
                 IsErrorClass = error,
-                Epoch = Wire.Slice(wire, offset + 44, 16),
-                BlockSequence = Wire.U64(wire, offset + 60),
+                Epoch = mappedWire.IsEmpty ? Wire.Slice(wire, offset + 44, 16) : mappedWire.Slice(44, 16).ToArray(),
+                BlockSequence = mappedWire.IsEmpty ? Wire.U64(wire, offset + 60)
+                    : System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(mappedWire.Slice(60)),
                 WireHash = hash,
             };
         }

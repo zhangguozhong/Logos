@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 namespace Logos.Storage
 {
     public sealed partial class JournalSession
@@ -13,6 +14,81 @@ namespace Logos.Storage
             VerifyOwner();
             directoryQuota.Step(context);
         }
+        internal bool CanAllocateMappedBuffer(int bytes)
+        {
+            CheckThread();
+            VerifyOwner();
+            return Status == JournalStatus.Ready
+                && directoryQuota.CanAllocateMappedBuffer(bytes, EffectiveOptions);
+        }
+
+        internal void RefreshMappedBufferUsage()
+        {
+            CheckThread();
+            VerifyOwner();
+            directoryQuota.RestartScan();
+        }
+
+        internal string MappedControlKeyId => controlKey?.KeyId;
+
+        internal long NextMappedAppendOffset => current.Exists ? current.CommittedEnd : StorageRuntimeLimits.FileHeaderBytes;
+
+        internal MappedSealedBuffer OpenMappedSealedBuffer()
+        {
+            CheckThread();
+            VerifyOwner();
+            string path = Path.Combine(directory, MappedSealedBuffer.FileName);
+            bool exists = files.Exists(path);
+            if (exists && !files.GetEntryInfo(path).IsRegularFile)
+                throw new IOException("Invalid sealed map path.");
+            if (!exists && !CanAllocateMappedBuffer(MappedSealedBuffer.FileBytes))
+                return null;
+            try { return new MappedSealedBuffer(path, !exists, controlKey); }
+            finally
+            {
+                if (!exists)
+                    RefreshMappedBufferUsage();
+            }
+        }
+
+        internal JournalAppendResult RecoverMappedAppend(ReadOnlySpan<byte> wire, long previousOffset,
+            MappedSealedBuffer mapped, bool error, WriteRateLimiter rate, long now)
+        {
+            CheckThread();
+            VerifyOwner();
+            if (Status != JournalStatus.Ready || IsCurrentClearTarget || current.Tombstone)
+                return JournalAppendResult.NotReady;
+            long position = NextMappedAppendOffset;
+            if (previousOffset >= 0 && previousOffset < position)
+            {
+                if (previousOffset < StorageRuntimeLimits.FileHeaderBytes || previousOffset > position - wire.Length)
+                    return JournalAppendResult.InvalidBlock;
+                try
+                {
+                    using (var reader = files.Open(DayPath(current.DayId), FileMode.Open, FileAccess.Read))
+                    {
+                        reader.Position = previousOffset;
+                        JournalIo.ReadExactly(reader, scratch, 0, wire.Length);
+                        return wire.SequenceEqual(scratch.AsSpan(0, wire.Length))
+                            ? JournalAppendResult.Committed : JournalAppendResult.InvalidBlock;
+                    }
+                }
+                catch (IOException) { return JournalAppendResult.IoFailed; }
+                catch (UnauthorizedAccessException) { return JournalAppendResult.IoFailed; }
+                finally { Array.Clear(scratch, 0, wire.Length); }
+            }
+            if (previousOffset > position)
+                return JournalAppendResult.InvalidBlock;
+            var preflight = PreflightOwnedAppend(error, wire.Length, current.DayId, WriteGeneration);
+            if (preflight != JournalAppendResult.Committed)
+                return preflight;
+            if (!rate.TryAcquire(error, wire.Length, now, out _))
+                return JournalAppendResult.NotReady;
+            if (previousOffset < 0)
+                mapped.BindAppend(error, position);
+            return TryAppendMapped(wire, current.DayId);
+        }
+
         // 仅作内部容量预检。不会写入或认证任意输入。
         // 公共 TryAppend 仍须认证完整线格式，并验证每条解码记录。
         internal JournalAppendResult PreflightOwnedAppend(bool errorClass, int length, long day, long generation)

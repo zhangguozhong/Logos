@@ -44,13 +44,14 @@ namespace Logos.Storage
             + normal.WorkspaceBytes + error.WorkspaceBytes + normal.ControlPayloadBytes + error.ControlPayloadBytes
             + (prepared?.WorkspaceBytes ?? 0) + (aggregation?.WorkspaceBytes ?? 0) + (incident?.WorkspaceBytes ?? 0)
             + 2048 // 诊断控制信箱、快照与有限 permit 的保守固定载荷预算。
+            + (mappedRequested ? MappedSealedBuffer.FileBytes + 4096 + 512 : 0)
             + 192 * sizeof(long) + 1024 * sizeof(long) + 1024;
         public LogClassMask ReadyClassMask
         {
             get
             {
                 if (disposed || completed || journal.Status != JournalStatus.Ready || encodingKey == null || activeDay < 0
-                    || journal.DirectoryInventoryInProgress || outcomeSequence > ulong.MaxValue - OutcomeReserve || (transitioning && transitionExpired))
+                    || journal.DirectoryInventoryInProgress || (mappedRequested && mappedRecoverySlot != 2) || outcomeSequence > ulong.MaxValue - OutcomeReserve || (transitioning && transitionExpired))
                     return LogClassMask.None;
                 if (prepared != null && (!prepared.IsEmpty || HasReadyDiagnostic(lastNow)))
                     return LogClassMask.None;
@@ -71,6 +72,7 @@ namespace Logos.Storage
                 throw new ArgumentNullException(nameof(storageOptions));
             if (directory == null)
                 throw new ArgumentNullException(nameof(directory));
+            mappedRequested = storageOptions.EnableMappedSealedBuffer;
             this.keys = keys ?? throw new ArgumentNullException(nameof(keys));
             this.authority = authority ?? new ConservativeJournalTimeAuthority();
             try
@@ -205,6 +207,8 @@ namespace Logos.Storage
         {
             if (staging.IsEmpty || staging.HasOutcome)
                 return;
+            if (!RetireMapped(staging, committed, reason == AdmissionReason.UncertainIo))
+                reason = AdmissionReason.UncertainIo;
             var kind = committed ? LogStorageOutcomeKind.Committed : LogStorageOutcomeKind.Dropped;
             if (!staging.BeginResolution(kind))
                 return;
@@ -261,6 +265,7 @@ namespace Logos.Storage
             encodingKey = null;
             blocks.Dispose();
             records.Dispose();
+            StopMapping();
             journal.Dispose();
             disposed = true;
             PublishHealth();

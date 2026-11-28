@@ -12,8 +12,9 @@ namespace Logos.Storage
         {
             get;
         }
-        public bool Ready => Status == JournalStatus.Ready;
-        public bool Recovering => Status == JournalStatus.New || Status == JournalStatus.Recovering;
+        public bool Ready => Status == JournalStatus.Ready && !MappedBufferInitializing;
+        public bool Recovering => Status == JournalStatus.New || Status == JournalStatus.Recovering ||
+            (Status == JournalStatus.Ready && MappedBufferInitializing);
         public bool Blocked => Status == JournalStatus.Blocked || Status == JournalStatus.DirectoryBusy;
         public JournalTimeDecisionKind TimeReason
         {
@@ -99,9 +100,24 @@ namespace Logos.Storage
         {
             get;
         }
+        public bool MappedBufferActive { get; }
+        public bool MappedBufferInitializing { get; }
+        public long MappedBlocksPublished { get; }
+        public long MappedBytesPublished { get; }
+        /// <summary>包含已经写入、仅回收映射槽的情况。</summary>
+        public long MappedBlocksRecovered { get; }
+        public long MappedBlocksRejected { get; }
+
         internal StorageHealthSnapshot(JournalSession session, int owned, long committed, long dropped, StorageIoMeasurements io,
-            BlockSealStatistics normalSeals, BlockSealStatistics errorSeals, long represented = 0, long derived = 0, long diagnosticBudgetRejections = 0)
+            BlockSealStatistics normalSeals, BlockSealStatistics errorSeals, long represented = 0, long derived = 0, long diagnosticBudgetRejections = 0, bool mappedActive = false, bool mappedInitializing = false,
+            long mappedPublished = 0, long mappedBytes = 0, long mappedRecovered = 0, long mappedRejected = 0)
         {
+            MappedBufferActive = mappedActive;
+            MappedBufferInitializing = mappedInitializing;
+            MappedBlocksPublished = mappedPublished;
+            MappedBytesPublished = mappedBytes;
+            MappedBlocksRecovered = mappedRecovered;
+            MappedBlocksRejected = mappedRejected;
             DiagnosticBudgetRejections = diagnosticBudgetRejections;
             RepresentedRecords = represented;
             DerivedPersistedRecords = derived;
@@ -141,7 +157,9 @@ namespace Logos.Storage
         private void PublishHealth()
         {
             lock (healthGate)
-                health = new StorageHealthSnapshot(journal, OwnedOriginalCount(), committedCount, droppedCount, io, normal.SealStatistics, error.SealStatistics, representedCount, derivedPersistedCount, diagnosticBudgetRejections);
+                health = new StorageHealthSnapshot(journal, OwnedOriginalCount(), committedCount, droppedCount, io, normal.SealStatistics, error.SealStatistics, representedCount, derivedPersistedCount, diagnosticBudgetRejections,
+                    mappedBuffer != null && mappedRecoverySlot == 2, mappedRequested && mappedRecoverySlot != 2,
+                    mappedBlocksPublished, mappedBytesPublished, mappedBlocksRecovered, mappedBlocksRejected);
         }
     }
 }

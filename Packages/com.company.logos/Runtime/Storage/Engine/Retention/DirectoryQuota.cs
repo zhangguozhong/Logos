@@ -317,6 +317,17 @@ namespace Logos.Storage
                 && Fits(ErrorBytes + UnknownBytes, error, o.DirectoryErrorBytes);
         }
 
+        internal bool CanAllocateMappedBuffer(int bytes, FrozenStorageOptions options)
+        {
+            if (bytes <= 0 || !IsReady || unsafeEntry || UploadUsageUnknown)
+                return false;
+
+            // 映射文件由目录清点保守计入未知字节。预检使用同一口径，避免创建时挤占两类日志额度。
+            return Fits(ActualBytes, bytes, options.MaxDirectoryBytes)
+                && Fits(NormalBytes + UnknownBytes + UploadBytes, bytes, options.DirectoryNormalBytes)
+                && Fits(ErrorBytes + UnknownBytes, bytes, options.DirectoryErrorBytes);
+        }
+
         private static bool Fits(long used, long addition, long limit) =>
             used >= 0 && addition >= 0 && used <= limit && addition <= limit - used;
 

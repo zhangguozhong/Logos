@@ -35,6 +35,8 @@ namespace Logos.Storage
             get;
         }
 
+        public bool EnableMappedSealedBuffer { get; }
+
         internal FrozenStorageOptions(
             long f,
             long e,
@@ -42,7 +44,8 @@ namespace Logos.Storage
             long d,
             long errors,
             long normal,
-            bool risk
+            bool risk,
+            bool enableMappedSealedBuffer = false
         )
         {
             MaxDailyFileBytes = f;
@@ -52,6 +55,7 @@ namespace Logos.Storage
             DirectoryErrorBytes = errors;
             DirectoryNormalBytes = normal;
             MayStopBeforeRetentionWindow = risk;
+            EnableMappedSealedBuffer = enableMappedSealedBuffer;
         }
     }
 }

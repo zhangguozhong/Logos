@@ -74,6 +74,23 @@ namespace Logos.Storage
             return false;
         }
 
+        internal ReadOnlySpan<byte> SealedDigest => sealedHash;
+
+        internal bool TryAuthenticateMapped(ReadOnlySpan<byte> wire, out byte[] hash)
+        {
+            hash = null;
+            if (wire.Length != Length)
+                return false;
+            Span<byte> measured = stackalloc byte[32];
+            using (var sha = SHA256.Create())
+                if (!sha.TryComputeHash(wire, measured, out int written) || written != measured.Length)
+                    return false;
+            if (!CryptographicOperations.FixedTimeEquals(measured, sealedHash))
+                return false;
+            hash = measured.ToArray();
+            return true;
+        }
+
         internal void Invalidate()
         {
             consumed = true;

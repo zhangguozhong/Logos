@@ -30,6 +30,7 @@ namespace Logos.Storage
                 && ReferenceEquals(fileSystem, other.fileSystem) && ReferenceEquals(leases, other.leases)
                 && Directory == other.Directory && Storage.MaxDailyFileBytes == other.Storage.MaxDailyFileBytes
                 && Storage.ErrorFatalReservedBytesPerDay == other.Storage.ErrorFatalReservedBytesPerDay
+                && Storage.EnableMappedSealedBuffer == other.Storage.EnableMappedSealedBuffer
                 && Storage.RetentionDays == other.Storage.RetentionDays && Storage.MaxDirectoryBytes == other.Storage.MaxDirectoryBytes
                 && StartupSettings.Match(Logging, Capture, other.Logging, other.Capture);
         }

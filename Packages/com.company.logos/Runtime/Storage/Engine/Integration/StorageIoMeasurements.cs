@@ -112,6 +112,14 @@ namespace Logos.Storage
                 owner.Calls++;
                 return Inner.Read(buffer, offset, count);
             }
+            public override void Write(ReadOnlySpan<byte> buffer)
+            {
+                owner.Calls++;
+                owner.WriteCalls++;
+                owner.WrittenBytes += buffer.Length;
+                Inner.Write(buffer);
+            }
+
             public override void Write(byte[] buffer, int offset, int count)
             {
                 owner.Calls++;

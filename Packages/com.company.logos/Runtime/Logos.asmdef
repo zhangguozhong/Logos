@@ -1,5 +1,6 @@
 {
   "name": "Logos",
   "rootNamespace": "Logos",
-  "references": []
+  "references": [],
+  "allowUnsafeCode": true
 }

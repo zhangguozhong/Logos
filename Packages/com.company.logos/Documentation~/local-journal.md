@@ -23,10 +23,17 @@ bool installed = LogosSdk.TryInitialize(
 | `ErrorFatalReservedBytesPerDay` | 2 MiB | 从当日总额中划给 Error/Fatal，两类共用 |
 | `RetentionDays` | 7 天 | 以 UTC 日计算的保留期，可配置 1～1,024 天 |
 | `MaxDirectoryBytes` | 64 MiB | 日志目录总预算，含元数据 |
+| `EnableMappedSealedBuffer` | 关闭 | 可选的文件映射恢复，用于异常退出后恢复已封装的日志 |
 
 普通和错误额度分别计量，互不借用。某类当日可用空间放不下待写块时，会丢弃该块并关闭该类当日写入；其余类别仍受自身额度约束。到期文件可清理，目录满时保留未过期文件。保留天数不能保证忙碌时每条日志都能留到期满。
 
 配置在初始化时生效。修改资产后需安全停止并重新初始化；新的每日总额和错误预留在下一确认有效日采用，当天恢复沿用已有文件的策略。调整目录上限会约束后续写入。
+
+## 可选的文件映射恢复
+
+在目标平台完成兼容性和性能验证后，可在初始化前设置 `storageSettings.EnableMappedSealedBuffer = true`。若出现配置冲突，安全停止当前会话后再切换。映射占用计入日志目录额度。平台接口不可用、目录额度不足或映射初始化失败时，SDK 继续使用普通文件写入。
+
+初始化时可通过 `owner.GetHealthSnapshot()` 观察 `MappedBufferInitializing` 和 `MappedBufferActive`，通过 `MappedBlocksRecovered` 查看重启时恢复或已提交核对的块数。恢复需要可信时间、匹配的密钥和有效的本地文件。异常退出时，仍在队列或尚未封装的记录可能丢失，突然断电后的持久性也受设备和文件系统影响。
 
 ## 失败与恢复
 

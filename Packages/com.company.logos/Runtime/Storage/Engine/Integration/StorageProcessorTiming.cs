@@ -96,6 +96,11 @@ namespace Logos.Storage
             }
             if (journal.Status == JournalStatus.Ready)
             {
+                if (StepMappedStartup(context))
+                {
+                    PublishGate();
+                    return FinishStep(context, mappedNextRecovery == 0);
+                }
                 if ((normalRetry != 0 && now >= normalRetry) || (errorRetry != 0 && now >= errorRetry))
                 {
                     if (normalRetry != 0 && now >= normalRetry)
@@ -233,8 +238,11 @@ namespace Logos.Storage
                 }
                 else
                     staging.RequestSeal(forceReason);
-                if (!staging.TrySeal(encodingHeader, encodingKey, Add(now, StorageRuntimeLimits.WriteWaitTicks), journal.WriteGeneration, out _))
+                bool sealedBlock = staging.TrySeal(encodingHeader, encodingKey, Add(now, StorageRuntimeLimits.WriteWaitTicks), journal.WriteGeneration, out _);
+                if (!sealedBlock)
                     Publish(staging, AdmissionReason.EncodingFailed);
+                else
+                    PublishMapped(staging, isError);
                 return true;
             }
             if (staging.IsSynthetic && (diagnosticAttempts >= 256 || diagnosticAttemptBytes > 1024 * 1024 - staging.SealedLength
@@ -279,7 +287,7 @@ namespace Logos.Storage
             else
                 appendUncertainNormal = true;
             // 故障逸出时保留此标记，使 CompletePending 不能把追加报告为确定失败。
-            var result = journal.TryAppend(staging.SealedLease);
+            var result = AppendMappedOrMemory(staging, isError);
             if (isError)
                 appendUncertainError = false;
             else
@@ -359,7 +367,7 @@ namespace Logos.Storage
                 state = QuotaAdmissionState.Closed;
                 n = e = journal.TimeDecision.Kind == JournalTimeDecisionKind.TimeUncertain ? AdmissionReason.TimeUncertain : AdmissionReason.TimeConfirmationRequired;
             }
-            else if (journal.Status != JournalStatus.Ready)
+            else if (journal.Status != JournalStatus.Ready || (mappedRequested && mappedRecoverySlot != 2))
             {
                 state = QuotaAdmissionState.Recovering;
                 n = e = journal.Status == JournalStatus.New ? AdmissionReason.NotReady : AdmissionReason.Recovering;
@@ -430,6 +438,8 @@ namespace Logos.Storage
                 next = Math.Min(next, Add(now, TimeSpan.TicksPerMillisecond * 2));
             else
                 next = Math.Min(next, nextJournal);
+            if (mappedRequested && mappedRecoverySlot != 2 && journal.Status == JournalStatus.Ready)
+                next = Math.Min(next, mappedNextRecovery == 0 ? now : mappedNextRecovery);
             next = SlotWake(normal, false, now, next);
             next = SlotWake(error, true, now, next);
             if (transitioning)

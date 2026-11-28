@@ -35,8 +35,14 @@ namespace Logos.Storage
             if (!journal.Clear.IsActive && journal.Clear.Status == ClearStatus.Completed)
             {
                 Volatile.Write(ref clearOwned, 0);
+                bool resumeMapping = mappedRequested && clearTargets != null;
                 clearTargets = null;
                 clearDayCursor = 0;
+                if (resumeMapping)
+                {
+                    mappedInitialized = false;
+                    mappedRecoverySlot = 0;
+                }
             }
             var scope = Volatile.Read(ref pendingClear);
             if (scope == null || journal.Status != JournalStatus.Ready)
@@ -55,6 +61,7 @@ namespace Logos.Storage
             CheckWorker();
             clearDayCursor = 0;
             clearTargets = scope;
+            StopMapping();
             InvalidateDiagnosticBudget();
             Volatile.Write(ref clearOwned, 1);
             auxiliaryBarrier?.CloseTargets(scope);

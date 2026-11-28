@@ -4,7 +4,7 @@ using System.Numerics;
 namespace Logos.Storage
 {
     // 保留天数受固定日期槽数限制；即使单日配额合法，目录总量仍可能不足以容纳整个保留窗口。
-    /// <summary>仅这四个属性配置保留策略。Freeze 是纯操作，不执行 I/O。</summary>
+    /// <summary>配置保留策略及可选文件映射。Freeze 是纯操作，不执行 I/O。</summary>
     public sealed class StorageOptions
     {
         public const long MetadataBudgetBytes = 2 * 1024 * 1024;
@@ -32,6 +32,8 @@ namespace Logos.Storage
             set;
         }
         = 64 * 1024 * 1024;
+
+        public bool EnableMappedSealedBuffer { get; set; }
 
         public FrozenStorageOptions Freeze()
         {
@@ -68,7 +70,8 @@ namespace Logos.Storage
                 d,
                 directoryError,
                 directoryNormal,
-                (BigInteger)d < (BigInteger)f * r + MetadataBudgetBytes
+                (BigInteger)d < (BigInteger)f * r + MetadataBudgetBytes,
+                EnableMappedSealedBuffer
             );
         }
     }

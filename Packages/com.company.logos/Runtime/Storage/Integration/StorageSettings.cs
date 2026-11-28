@@ -11,6 +11,14 @@ namespace Logos.Storage
         [SerializeField] private long errorFatalReservedBytesPerDay = 2 * 1024 * 1024;
         [SerializeField] private int retentionDays = 7;
         [SerializeField] private long maxDirectoryBytes = 64 * 1024 * 1024;
+        [SerializeField] private bool enableMappedSealedBuffer;
+
+        public bool EnableMappedSealedBuffer
+        {
+            get => enableMappedSealedBuffer;
+            set => enableMappedSealedBuffer = value;
+        }
+
         public long MaxDailyFileBytes
         {
             get => maxDailyFileBytes;
@@ -43,7 +51,8 @@ namespace Logos.Storage
                     MaxDailyFileBytes = maxDailyFileBytes,
                     ErrorFatalReservedBytesPerDay = errorFatalReservedBytesPerDay,
                     RetentionDays = retentionDays,
-                    MaxDirectoryBytes = maxDirectoryBytes
+                    MaxDirectoryBytes = maxDirectoryBytes,
+                    EnableMappedSealedBuffer = enableMappedSealedBuffer
                 }.Freeze();
                 return true;
             }
